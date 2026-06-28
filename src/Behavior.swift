@@ -175,7 +175,7 @@ extension AppDelegate {
               st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
         let m = NSEvent.mouseLocation
         let above = m.y - y                         // насколько мышь выше кота
-        if abs(m.x - x) < 130 && above > 45 && above < 250 {   // мышь выше головы и в досягаемости
+        if abs(m.x - x) < 75 && above > 45 && above < 250 {   // мышь над котом (не слишком вбок) и в досягаемости
             hoverTicks += 1
             if hoverTicks >= 6 {                    // мышь зависла (~0.6с), а не пролетела
                 hoverTicks = 0
