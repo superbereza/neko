@@ -22,15 +22,17 @@ final class NekoView: NSImageView {
     var began: (() -> Void)?
     var moved: ((CGPoint) -> Void)?
     var ended: (() -> Void)?
-    private var startMouse = NSPoint.zero
-    private var startOrigin = NSPoint.zero
+    var throwVel = CGPoint.zero       // скорость броска (для параболы при отпускании)
+    private var lastMouse = NSPoint.zero
     override func mouseDown(with e: NSEvent) {
-        startMouse = NSEvent.mouseLocation
-        startOrigin = window?.frame.origin ?? .zero
+        lastMouse = NSEvent.mouseLocation
+        throwVel = .zero
         began?()
     }
     override func mouseDragged(with e: NSEvent) {
         let m = NSEvent.mouseLocation
+        throwVel = CGPoint(x: m.x - lastMouse.x, y: m.y - lastMouse.y)   // мгновенная скорость руки
+        lastMouse = m
         // курсор держит кота за фиксированную точку (за «попу» сверху), тело свисает
         let o = NSPoint(x: m.x - bounds.width / 2, y: m.y - bounds.height * 0.85)
         window?.setFrameOrigin(o)
@@ -131,6 +133,26 @@ enum Mood: String, CaseIterable {
     }
 }
 
+// Движок поведения: решает «мозг + позу» за тик. Переключается в дебаге.
+// Физика корма, перетаскивание и падение — общие (в tick), движков не касаются.
+protocol CatEngine: AnyObject {
+    var label: String { get }
+    func step(_ app: AppDelegate)
+}
+// Текущее поведение — рефлексный агент: условие→действие, флаги + взвешенный рандом. Эталон.
+final class ReflexEngine: CatEngine {
+    let label = "reflex"
+    func step(_ app: AppDelegate) { app.reflexStep() }
+}
+// Новый движок — utility-агент: нужды + полезность + рутины. WIP: пока повторяет рефлекс.
+final class UtilityEngine: CatEngine {
+    let label = "utility"
+    func step(_ app: AppDelegate) { app.reflexStep() }   // TODO: заменить на needs+utility-мозг
+}
+func makeEngine(_ name: String) -> CatEngine {
+    name == "utility" ? UtilityEngine() : ReflexEngine()
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var win: NSWindow!
     let iv = NekoView()
@@ -149,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var leaving = false
     var awayLeft = false
     var fallVy: CGFloat = 0     // вертикальная скорость при падении
+    var fallVx: CGFloat = 0     // горизонтальная скорость (бросок по параболе)
     var fallY: CGFloat = 0
     var hunger = 0.0          // 0..1 — растёт со временем, обнуляется едой (~15 мин до макс.)
     var energy = 0.7           // 0..1 — растёт во сне, тратится в активности
@@ -159,8 +182,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни
     let FOOD_SPEED: CGFloat = 9 // скорость к корму
-    let SATIATION = 0.34        // насколько один катышек утоляет голод (0..1)
-    let EAT_HUNGER = 0.15       // ниже этого голода кот уже не идёт к корму
+    let HUNGER_RATE = 0.0000035 // голод до максимума ~8 ч (как у живой кошки); голодное настроение — вдвое быстрее
+    let SATIATION = 0.13        // один катышек насыщает немного — сытный приём это ~3–5 катышков
+    let EAT_HUNGER = 0.5        // идёт к корму, проголодавшись (~через 4 ч после еды)
+    let FULL = 0.05            // ест, пока голод не упадёт почти до нуля
     var statusItem: NSStatusItem!
     var hotKeyRef: EventHotKeyRef?
     var pourTimer: Timer?
@@ -173,6 +198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var dbgItems: [NSMenuItem] = []
     var dbgState: NSMenuItem!, dbgEnergy: NSMenuItem!, dbgBoredom: NSMenuItem!
     var dbgHunger: NSMenuItem!, dbgMood: NSMenuItem!
+    var engine: CatEngine = ReflexEngine()
+    var engineReflexItem: NSMenuItem!, engineUtilityItem: NSMenuItem!
 
     let sets: [String: [(Int, Int)]] = [
         "idle":    [(3, 3)],
@@ -213,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let day = Calendar.current.ordinality(of: .day, in: .year, for: Date()) ?? 0
         mood = Mood.allCases[day % Mood.allCases.count]
         restoreState()   // восстановить потребности, позицию и корм
+        engine = makeEngine(UserDefaults.standard.string(forKey: "neko.engine") ?? "reflex")
         win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
         win.orderFrontRegardless()
 
@@ -248,6 +276,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             copyItem.isHidden = !debug
             dbgItems.append(copyItem)   // прячется/показывается вместе с дебагом
             menu.addItem(copyItem)
+
+            menu.addItem(.separator())
+            engineReflexItem  = NSMenuItem(title: "Engine: Reflex",  action: #selector(setEngineReflex),  keyEquivalent: "")
+            engineUtilityItem = NSMenuItem(title: "Engine: Utility", action: #selector(setEngineUtility), keyEquivalent: "")
+            engineReflexItem.state  = engine.label == "reflex"  ? .on : .off
+            engineUtilityItem.state = engine.label == "utility" ? .on : .off
+            menu.addItem(engineReflexItem)
+            menu.addItem(engineUtilityItem)
         }
 
         menu.addItem(.separator())
@@ -342,8 +378,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dragging = false
         x = win.frame.origin.x + SIZE / 2
         fallY = win.frame.origin.y + SIZE / 2   // откуда падать
-        fallVy = 0
-        st = .falling                           // мягко приземлится на лапы
+        fallVx = max(-42, min(42, iv.throwVel.x * 0.55))      // бросок по параболе (горизонталь шире)
+        fallVy = -max(-28, min(28, iv.throwVel.y * 0.55))     // вертикаль скромнее — кот не улетает в космос
+        st = .falling                           // мягко приземлится на лапы (без отскока)
     }
 
     // MARK: состояние
@@ -439,12 +476,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        if st == .falling {                 // мягко падает на лапы после отпускания
+        if st == .falling {                 // летит по параболе и мягко садится (без отскока)
             let ground = bottomY()
-            fallVy += 3
+            let top = (NSScreen.main ?? NSScreen.screens[0]).frame.maxY - SIZE / 2
+            fallVy += 6                      // гравитация (короткий реалистичный полёт)
             fallY -= fallVy
+            x += fallVx                      // горизонтальный полёт
+            fallVx *= 0.985                  // воздух
+            let lo = leftEdge(), hi = rightEdge()
+            if x < lo { x = lo; fallVx = 0 } // о стену — гасим, не отскакиваем
+            if x > hi { x = hi; fallVx = 0 }
+            if fallY > top { fallY = top; if fallVy < 0 { fallVy = 0 } }   // не выше экрана
             if fallY <= ground {
                 fallY = ground
+                fallVx = 0
                 enter(.idle)
                 iv.image = frame("idle", 0)
             } else {
@@ -454,10 +499,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             anim += 1
             return
         }
+        engine.step(self)                   // мозг+поза: Reflex или Utility (физика/драг/падение — общие выше)
+    }
 
+    // Текущее («рефлексное») поведение за один тик — мозг + поза. Эталон, его пиннят тесты.
+    func reflexStep() {
         y = bottomY()
         stTicks += 1
-        hunger = min(1, hunger + (mood == .hungry ? 0.00022 : 0.00011))  // голодное настроение — быстрее
+        hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
 
         // потребности: энергия и скука дрейфуют по состоянию
         switch st {
@@ -538,7 +587,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             k.win.orderOut(nil)
                             kibbles.removeAll { $0 === k }
                             eatingRef = nil; eating = false
-                            decideNext()           // голоден ещё? — пойдёт к следующему катышку
+                            if hunger > FULL, let c = pileCenter() {   // ещё не наелся и есть корм — к следующему
+                                toFood = true; targetX = c; enter(.walk)
+                            } else {
+                                decideNext()
+                            }
                         }
                     }
                 } else {                            // схватили/улетел — перестаём есть
@@ -617,9 +670,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshDebug()
     }
 
+    @objc func setEngineReflex()  { switchEngine("reflex") }
+    @objc func setEngineUtility() { switchEngine("utility") }
+    func switchEngine(_ name: String) {
+        UserDefaults.standard.set(name, forKey: "neko.engine")
+        engine = makeEngine(name)
+        enter(.idle)   // чистый сброс переходных флагов при смене движка
+        engineReflexItem?.state  = name == "reflex"  ? .on : .off
+        engineUtilityItem?.state = name == "utility" ? .on : .off
+    }
+
     @objc func copyDebugState() {
         let s = """
         neko \(VERSION)
+        engine: \(engine.label)
         state: \(st.label)
         energy: \(String(format: "%.2f", energy))
         boredom: \(String(format: "%.2f", boredom))

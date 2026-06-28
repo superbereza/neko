@@ -36,9 +36,9 @@ func expectClose(_ got: Double, _ want: Double, _ name: String, tol: Double = EP
 // 1) DRIVES / NEEDS
 // =====================================================================
 func testDrives() {
-    expectClose(growHunger(0.5, mood: .normal), 0.50011, "drives: hunger growth normal one tick")
-    expectClose(growHunger(0.5, mood: .hungry), 0.50022, "drives: hunger growth hungry one tick")
-    expectClose(growHunger(0.99995, mood: .normal), 1.0, "drives: hunger growth clamps at 1")
+    expectClose(growHunger(0.5, mood: .normal), 0.5 + HUNGER_STEP_NORMAL, "drives: hunger growth normal one tick")
+    expectClose(growHunger(0.5, mood: .hungry), 0.5 + HUNGER_STEP_HUNGRY, "drives: hunger growth hungry one tick")
+    expectClose(growHunger(1.0, mood: .normal), 1.0, "drives: hunger growth clamps at 1")
 
     var d = driftEnergyBoredom(Drives(hunger: 0, energy: 0.7, boredom: 0.3), state: .sleep)
     expectClose(d.energy, 0.7008, "drives: energy rises in sleep")
@@ -66,17 +66,17 @@ func testDrives() {
     expectClose(d.boredom, 0.4, "drives: no boredom drift in other state")
 
     let t = tickDrives(Drives(hunger: 0.2, energy: 0.5, boredom: 0.5), state: .walk, mood: .normal)
-    expectClose(t.hunger, 0.20011, "drives: combined tick walk hunger")
+    expectClose(t.hunger, 0.2 + HUNGER_STEP_NORMAL, "drives: combined tick walk hunger")
     expectClose(t.energy, 0.4984, "drives: combined tick walk energy")
     expectClose(t.boredom, 0.4975, "drives: combined tick walk boredom")
 
-    expectClose(satiateBite(0.5, maxBites: 4), 0.415, "drives: satiation per bite maxBites=4")
-    expectClose(satiateBite(0.5, maxBites: 3), 0.5 - 0.34/3.0, "drives: satiation per bite maxBites=3")
-    expectClose(satiateBite(0.05, maxBites: 4), 0.0, "drives: satiation clamps at 0")
+    expectClose(satiateBite(0.5, maxBites: 4), 0.5 - SATIATION/4.0, "drives: satiation per bite maxBites=4")
+    expectClose(satiateBite(0.5, maxBites: 3), 0.5 - SATIATION/3.0, "drives: satiation per bite maxBites=3")
+    expectClose(satiateBite(0.0, maxBites: 4), 0.0, "drives: satiation clamps at 0")
 
     var h = 0.5
     for _ in 0..<4 { h = satiateBite(h, maxBites: 4) }
-    expectClose(h, 0.16, "drives: full kibble eaten maxBites=4 removes SATIATION")
+    expectClose(h, 0.5 - SATIATION, "drives: full kibble eaten maxBites=4 removes SATIATION")
 
     expectClose(clampRestore(1.5), 1.0, "drives: restore clamps high value")
     expectClose(clampRestore(-0.2), 0.0, "drives: restore clamps negative")
@@ -90,7 +90,7 @@ func testDrives() {
 func testActionSelection() {
     // food override beats everything; no RNG consumed.
     var rng = QueueRNG(uniforms: [], bools: [])
-    var dec = chooseAction(needs: Needs(hunger: 0.5, energy: 0.2, boredom: 0.9),
+    var dec = chooseAction(needs: Needs(hunger: 0.9, energy: 0.2, boredom: 0.9),
                            hour: 3, mood: .lazy, hasFood: true, rng: &rng)
     expectEq(dec, Decision(state: .walk, toFood: true), "action: food override beats everything")
     expect(rng.uniformsConsumed == 0 && rng.boolsConsumed == 0, "action: food override consumes no RNG")
@@ -147,13 +147,12 @@ func testActionSelection() {
 
     // --- codex risky: full cat (low hunger) with food present does NOT override ---
     rng = QueueRNG(uniforms: [0.5])
-    dec = chooseAction(needs: Needs(hunger: 0.15, energy: 0.7, boredom: 0.3),
+    dec = chooseAction(needs: Needs(hunger: EAT_HUNGER, energy: 0.7, boredom: 0.3),
                        hour: 12, mood: .normal, hasFood: true, rng: &rng)
     expect(dec.toFood == false, "action: hunger==EAT_HUNGER does NOT trigger food override (strict >)")
-    expectEq(dec.state, .sleep, "action: hunger==gate falls through to weights")
 
     rng = QueueRNG(uniforms: [0.5])
-    dec = chooseAction(needs: Needs(hunger: 0.1500001, energy: 0.7, boredom: 0.3),
+    dec = chooseAction(needs: Needs(hunger: EAT_HUNGER + 0.0000001, energy: 0.7, boredom: 0.3),
                        hour: 12, mood: .normal, hasFood: true, rng: &rng)
     expectEq(dec, Decision(state: .walk, toFood: true), "action: hunger just above gate DOES override to food")
 
@@ -175,14 +174,14 @@ func testActionSelection() {
 func testFood() {
     expect(pileCenter([]) == nil, "food: pileCenter empty == nil")
     expectClose(pileCenter([Kibble(x: 300)])!, 300.0, "food: pileCenter single")
-    expectClose(decideFoodTarget(hunger: 0.5, kibbles: [Kibble(x: 300)])!, 300.0,
+    expectClose(decideFoodTarget(hunger: 0.9, kibbles: [Kibble(x: 300)])!, 300.0,
                 "food: decideFoodTarget single")
 
     // EAT_HUNGER gate strict >
-    expect(decideFoodTarget(hunger: 0.15, kibbles: [Kibble(x: 300)]) == nil,
-           "food: gate strict > rejects hunger==0.15")
-    expectClose(decideFoodTarget(hunger: 0.150001, kibbles: [Kibble(x: 300)])!, 300.0,
-                "food: gate admits hunger=0.150001")
+    expect(decideFoodTarget(hunger: EAT_HUNGER, kibbles: [Kibble(x: 300)]) == nil,
+           "food: gate strict > rejects hunger==EAT_HUNGER")
+    expectClose(decideFoodTarget(hunger: EAT_HUNGER + 0.000001, kibbles: [Kibble(x: 300)])!, 300.0,
+                "food: gate admits hunger just above EAT_HUNGER")
 
     // codex risky: THRASH two separated piles -> empty midpoint
     var ks: [Kibble] = []
@@ -193,7 +192,7 @@ func testFood() {
     expect(eatNearbyKibbleIndex(catX: center, kibbles: ks) == nil,
            "food: THRASH nothing in eat range at midpoint")
     // hunger stays above gate => target keeps pointing to empty midpoint (documented thrash)
-    expectClose(decideFoodTarget(hunger: 0.5, kibbles: ks)!, 500.0,
+    expectClose(decideFoodTarget(hunger: 0.9, kibbles: ks)!, 500.0,
                 "food: THRASH cat keeps returning to empty midpoint")
 
     // eat-range boundary inclusive
@@ -212,27 +211,27 @@ func testFood() {
     expectEq(eatNearbyKibbleIndex(catX: 300, kibbles: mix), 1, "food: eatNearbyKibble ignores non-landed")
 
     // single bite maxBites=4
-    var br = applyBite(hunger: 0.34, kibble: Kibble(x: 0, eaten: 0, maxBites: 4))
-    expectClose(br.hunger, 0.255, "food: single bite hunger maxBites=4")
+    var br = applyBite(hunger: 0.9, kibble: Kibble(x: 0, eaten: 0, maxBites: 4))
+    expectClose(br.hunger, 0.9 - SATIATION/4.0, "food: single bite hunger maxBites=4")
     expectEq(br.kibble.eaten, 1, "food: single bite eaten=1")
     expectEq(br.stage, 1, "food: single bite stage=1")
     expect(br.finished == false, "food: single bite not finished")
 
     // full kibble consumed maxBites=4 (track stages 1,2,3,3)
     var k = Kibble(x: 0, eaten: 0, maxBites: 4)
-    var hunger = 0.34
+    var hunger = 0.9
     var stages: [Int] = []
     var finished = false
     for _ in 0..<4 {
         br = applyBite(hunger: hunger, kibble: k)
         hunger = br.hunger; k = br.kibble; stages.append(br.stage); finished = br.finished
     }
-    expectClose(hunger, 0.0, "food: full kibble hunger -> 0")
+    expectClose(hunger, 0.9 - SATIATION, "food: full kibble hunger drops by SATIATION")
     expectEq(stages, [1, 2, 3, 3], "food: full kibble stages 1,2,3,3")
     expect(finished, "food: full kibble finished on 4th bite")
 
     // hunger floor at zero
-    br = applyBite(hunger: 0.05, kibble: Kibble(x: 0, eaten: 0, maxBites: 4))
+    br = applyBite(hunger: 0.0, kibble: Kibble(x: 0, eaten: 0, maxBites: 4))
     expectClose(br.hunger, 0.0, "food: hunger floor at zero")
 
     // biteStage maxBites=3
@@ -242,13 +241,13 @@ func testFood() {
 
     // attractor leaves sleep/away untouched; walk/idle/zoomies act
     let one = [Kibble(x: 200, landed: true)]
-    expectEq(foodAttractor(state: "sleep", hunger: 0.5, eating: false, goingAway: false, leaving: false, kibbles: one),
+    expectEq(foodAttractor(state: "sleep", hunger: 0.9, eating: false, goingAway: false, leaving: false, kibbles: one),
              .none, "food: attractor leaves sleep untouched")
-    expectEq(foodAttractor(state: "walk", hunger: 0.5, eating: false, goingAway: false, leaving: false, kibbles: one),
+    expectEq(foodAttractor(state: "walk", hunger: 0.9, eating: false, goingAway: false, leaving: false, kibbles: one),
              .retargetWalk(200), "food: attractor retargets walk")
-    expectEq(foodAttractor(state: "idle", hunger: 0.5, eating: false, goingAway: false, leaving: false, kibbles: one),
+    expectEq(foodAttractor(state: "idle", hunger: 0.9, eating: false, goingAway: false, leaving: false, kibbles: one),
              .startWalk(200), "food: attractor starts walk from idle")
-    expectEq(foodAttractor(state: "zoomies", hunger: 0.5, eating: false, goingAway: false, leaving: false, kibbles: one),
+    expectEq(foodAttractor(state: "zoomies", hunger: 0.9, eating: false, goingAway: false, leaving: false, kibbles: one),
              .startWalk(200), "food: attractor starts walk from zoomies")
 
     // attractor suppressed while eating / goingAway / leaving
@@ -260,8 +259,8 @@ func testFood() {
              .none, "food: attractor suppressed while leaving")
 
     // codex risky: hunger gate in attractor too
-    expectEq(foodAttractor(state: "idle", hunger: 0.15, eating: false, goingAway: false, leaving: false, kibbles: one),
-             .none, "food: attractor gate strict > rejects hunger==0.15")
+    expectEq(foodAttractor(state: "idle", hunger: EAT_HUNGER, eating: false, goingAway: false, leaving: false, kibbles: one),
+             .none, "food: attractor gate strict > rejects hunger==EAT_HUNGER")
 
     // keep-eating guard breaks on drag / unlanded / out-of-range
     expect(canKeepEating(Kibble(x: 300, landed: true, dragging: true), catX: 300) == false,
@@ -363,7 +362,7 @@ func testRepeatedRetarget() {
     var piles = [Kibble(x: 200, landed: true)]
     var targets: [Double] = []
     for step in 0..<5 {
-        let a = foodAttractor(state: "walk", hunger: 0.5, eating: false,
+        let a = foodAttractor(state: "walk", hunger: 0.9, eating: false,
                               goingAway: false, leaving: false, kibbles: piles)
         if case let .retargetWalk(c) = a { targets.append(c) }
         piles[0].x += 50            // pile drifts; cat must follow

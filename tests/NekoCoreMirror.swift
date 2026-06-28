@@ -80,12 +80,12 @@ struct QueueRNG: RandomSource {
 let CELL = 32                       // neko.swift:9
 let SCALE: Double = 2               // neko.swift:10
 let SIZE: Double = Double(CELL) * SCALE   // 64, neko.swift:11
-let SATIATION = 0.34                // neko.swift:162
-let EAT_HUNGER = 0.15               // neko.swift:163
+let SATIATION = 0.13                // neko.swift:162
+let EAT_HUNGER = 0.5                // neko.swift:163
 let STAGES_COUNT = 4               // KibbleDot.stages.count, neko.swift:52-57
 let BITE_PERIOD = 16               // neko.swift:524
-let HUNGER_STEP_NORMAL = 0.00011    // neko.swift:453
-let HUNGER_STEP_HUNGRY = 0.00022    // neko.swift:453
+let HUNGER_STEP_NORMAL = 0.0000035    // neko.swift:453
+let HUNGER_STEP_HUNGRY = 0.000007     // neko.swift:453
 
 // =====================================================================
 // MARK: 1) DRIVES / NEEDS
