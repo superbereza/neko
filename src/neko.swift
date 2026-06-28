@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.2"
+let VERSION = "1.0.3"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -214,7 +214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         registerFoodHotkey()
         enter(.sleep)
-        Timer.scheduledTimer(withTimeInterval: TICK, repeats: true) { [weak self] _ in self?.tick() }
+        // .common — чтобы кот продолжал двигаться при открытом меню
+        let tickT = Timer(timeInterval: TICK, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(tickT, forMode: .common)
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.saveState() }
         // проверка обновлений при запуске и раз в 6 часов
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.checkForUpdates() }
