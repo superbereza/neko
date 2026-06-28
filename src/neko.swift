@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.14"
+let VERSION = "1.0.15"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var playSat = 0.0          // 0..1 — насколько клубок надоел (растёт от игры, спадает со временем)
     var playTired = false      // наигрался — отдыхает, пока интерес не восстановится (гистерезис)
     var playDir: CGFloat = 1   // в какую сторону толкнуть в этот раз (чередуется)
+    var playCool = 0           // пауза после удара по мячу — не семенить вокруг, дать ему отлететь
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни

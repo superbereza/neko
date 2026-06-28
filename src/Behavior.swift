@@ -54,14 +54,14 @@ extension AppDelegate {
 
         let hN = hunger                                     // 0..1 — насколько голоден
         let hour = Calendar.current.component(.hour, from: Date())
-        let night = hour >= 23 || hour < 6                  // ночью спит крепче
-        let crep = (hour >= 6 && hour < 9) || (hour >= 18 && hour < 22)  // сумерки — пик активности
+        let bedtime = hour >= 22 || hour < 7                // вечером укладывается
+        let act = dayEnergy(hour)                           // циркадная активность (утро бодр, обед вял, вечер подъём)
 
         // веса действий по потребностям и времени суток
-        var wSleep = (1.4 - energy) + (night ? 1.4 : 0.3)        // устал/ночь → спать
-        var wWalk = 0.5 + boredom * 0.9 + energy * 0.3          // скучно/бодр → бродить
-        var wZoom = max(0, boredom * energy * (0.4 + hN)) * (crep ? 2.0 : 0.5) // → носиться
-        var wIdle = 0.5                                         // посидеть/умыться
+        var wSleep = (1.4 - energy) + (bedtime ? 2.5 : (1.0 - act))     // устал/ночь → спать
+        var wWalk = (0.5 + boredom * 0.9 + energy * 0.3) * (0.4 + act)  // скучно/бодр → бродить
+        var wZoom = max(0, boredom * energy * (0.4 + hN)) * act         // → носиться
+        var wIdle = 0.5                                                 // посидеть/умыться
 
         // настроение дня меняет акценты
         switch mood {
@@ -71,6 +71,8 @@ extension AppDelegate {
         case .hungry:  wZoom *= 1.5; wWalk *= 1.2
         case .normal:  break
         }
+
+        if bedtime { wSleep += 3; wWalk *= 0.3; wZoom *= 0.05; wIdle *= 0.4 }   // вечер/ночь — в сон
 
         let weights: [(St, Double)] = [(.sleep, wSleep), (.walk, wWalk), (.zoomies, wZoom), (.idle, wIdle)]
         let total = weights.reduce(0) { $0 + max(0, $1.1) }
@@ -104,19 +106,33 @@ extension AppDelegate {
         if v <= lo { return 0 }; if v >= hi { return 1 }; return (v - lo) / (hi - lo)
     }
 
+    // циркадная активность по часу: утро бодрый, обед вялый, вторая половина дня — второй подъём, ночь — сон
+    func dayEnergy(_ hour: Int) -> Double {
+        switch hour {
+        case 7...8:   return 0.7    // только проснулся, раскачивается
+        case 9...13:  return 1.3    // утро/день — самый энергичный
+        case 14...16: return 0.35   // после обеда клонит в сон (сиеста)
+        case 17...20: return 1.15   // вечер — второй подъём
+        case 21:      return 0.5    // вечер — успокаивается
+        default:      return 0.12   // ночь (22..6) — почти всегда спит
+        }
+    }
+    // сейчас «ночь/отбой» (не игривый, спит подолгу)
+    var bedtimeNow: Bool { let h = Calendar.current.component(.hour, from: Date()); return h >= 22 || h < 7 }
+
     func utilityDecide() {
         toFood = false; toPlay = false; goingAway = false; leaving = false
         if hunger > EAT_HUNGER, let c = foodTargetX() { toFood = true; targetX = c; enter(.walk); return }
-        if energy > 0.45 && Double.random(in: 0..<1) < 0.10 { enter(.zoomies); return }   // иногда внезапно «носится»
 
         let hour = Calendar.current.component(.hour, from: Date())
-        let night = hour >= 23 || hour < 6
-        let crep = (hour >= 6 && hour < 9) || (hour >= 18 && hour < 22)
+        let bedtime = hour >= 22 || hour < 7        // вечером пора укладываться спать
+        let act = dayEnergy(hour)                   // циркадная активность 0..1.3 (утро бодр, обед вял, вечер второй подъём)
+        if !bedtime && energy > 0.45 && Double.random(in: 0..<1) < 0.10 * act { enter(.zoomies); return }   // днём иногда внезапно «носится»
 
-        // полезности из нужд (response-кривые: «игнорить до порога, потом расти»)
-        var uSleep = ramp(1 - energy, 0.35, 0.95) * (night ? 1.4 : 0.7)   // спит, когда реально устал
-        var uWalk  = 0.7 + ramp(boredom, 0.05, 0.7) * 1.0 + energy * 0.2  // спокойная прогулка — частая
-        var uZoom  = ramp(boredom, 0.6, 1.0) * energy * (crep ? 1.0 : 0.3) // беготня — реже, когда очень бодр и скучно
+        // полезности из нужд (response-кривые: «игнорить до порога, потом расти»), масштаб по времени суток
+        var uSleep = ramp(1 - energy, 0.35, 0.95) * (bedtime ? 2.0 : (1.4 - act))  // спит, когда устал; вечером — сильно
+        var uWalk  = (0.7 + ramp(boredom, 0.05, 0.7) * 1.0 + energy * 0.2) * (0.4 + act)  // спокойная прогулка
+        var uZoom  = ramp(boredom, 0.6, 1.0) * energy * act               // беготня — когда бодр, скучно и день активный
         var uIdle  = 0.6                                                  // посидеть/умыться
 
         switch mood {
@@ -134,6 +150,8 @@ extension AppDelegate {
         case .idle:    uIdle *= 1.1
         default: break
         }
+
+        if bedtime { uSleep += 2.5; uWalk *= 0.3; uZoom *= 0.05; uIdle *= 0.4 }   // вечер/ночь — сильно тянет в сон
 
         let weights: [(St, Double)] = [(.sleep, uSleep), (.walk, uWalk), (.zoomies, uZoom), (.idle, uIdle)]
         let total = weights.reduce(0) { $0 + max(0, $1.1) }
@@ -170,7 +188,7 @@ extension AppDelegate {
 
     // Восприятие окружения: мышь прямо НАД котом в зоне досягаемости → вертикальный подскок.
     func perceive() {
-        guard mood == .playful,                       // охотится только в игривом настроении
+        guard mood == .playful, !bedtimeNow,          // охотится только в игривом настроении и не ночью
               huntCool == 0, !eating, !toFood, !goingAway, !leaving,
               st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
         let m = NSEvent.mouseLocation
@@ -192,10 +210,11 @@ extension AppDelegate {
     // Игра с клубком: если клубок есть и кот не очень устал — всегда бежит к нему
     // (пока клубок не надоест). Еда в приоритете.
     func playAttract() {
-        guard let k = preferredYarn(), !k.dragging, !eating, !toFood, !goingAway, !leaving else {
-            toPlay = false; return                       // нет мяча/занят — не делаем вид, что бежим
+        guard let k = preferredYarn(), !k.dragging, !eating, !toFood, !goingAway, !leaving, !bedtimeNow else {
+            toPlay = false; return                       // нет мяча/занят/ночь — не делаем вид, что бежим
         }
         if toPlay { targetX = k.x; return }              // уже бежит к мячу — не передумывает на полпути
+        if playCool > 0 { return }                       // только что ударил — пауза, пусть мяч отлетит (не семеним вокруг)
 
         // «хочу играть» = насколько не наигрался (1-playSat) × насколько есть силы (energy).
         // Выдохся (energy низкая) → НЕ играет, лежит и копит силы. Скука с одним мячом гасит интерес
@@ -212,10 +231,11 @@ extension AppDelegate {
     // Толчок лапой, по очереди в разные стороны, разной силой — то слабо, то сильно подбросит.
     func batYarn() {
         guard let k = nearestYarn() else { return }
-        k.vx = playDir * CGFloat.random(in: 3...14)   // сила удара каждый раз разная
+        let dir: CGFloat = Bool.random() ? 1 : -1     // в какую сторону отскочит — случайно
+        k.vx = dir * CGFloat.random(in: 3...14)       // сила удара каждый раз разная
         k.vy = CGFloat.random(in: 3...11)             // иногда подкидывает повыше
         k.landed = false
-        playDir = -playDir                          // следующий раз — в другую сторону
+        playCool = 16                               // ~1.6 c не гнаться снова — мяч успевает отлететь
         boredom = max(0, boredom - 0.05)            // игра развлекает
         playSat = min(1, playSat + 0.04)            // от СВОЕЙ игры постепенно надоедает (скучает с одним мячом)
         if playSat >= 0.85 { playTired = true }
@@ -241,16 +261,18 @@ extension AppDelegate {
         let mm = NSEvent.mouseLocation                       // движение курсора за тик (для побудки мышкой)
         mouseDelta = hypot(mm.x - lastMouseX, mm.y - lastMouseY)
         lastMouseX = mm.x; lastMouseY = mm.y
+        if playCool > 0 { playCool -= 1 }                    // пауза после удара по мячу
         hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
         playSat = max(0, playSat - 0.0006)   // интерес к клубку восстанавливается медленно (дольше отдыхает)
         if playSat <= 0.35 { playTired = false }   // отдохнул — снова можно играть (гистерезис)
 
         // потребности: энергия и скука дрейфуют по состоянию
         switch st {
-        case .sleep:                 energy = min(1, energy + 0.0008); boredom = min(1, boredom + 0.0004)
-        case .walk, .zoomies, .hunt: energy = max(0, energy - 0.0016); boredom = max(0, boredom - 0.0025)
-        case .digging, .away:        boredom = max(0, boredom - 0.0015)   // прогулка тоже развлекает
-        case .idle:                  energy = min(1, energy + 0.0003); boredom = min(1, boredom + 0.0007)
+        case .sleep:          energy = min(1, energy + 0.0008); boredom = min(1, boredom + 0.0004)
+        case .walk:           energy = max(0, energy - 0.0005); boredom = max(0, boredom - 0.0020)  // спокойная ходьба почти не утомляет
+        case .zoomies, .hunt: energy = max(0, energy - 0.0011); boredom = max(0, boredom - 0.0030)  // беготня/охота тратит силы
+        case .digging, .away: boredom = max(0, boredom - 0.0015)   // прогулка тоже развлекает
+        case .idle:           energy = min(1, energy + 0.0004); boredom = min(1, boredom + 0.0007)
         default: break
         }
 
@@ -373,11 +395,16 @@ extension AppDelegate {
             }
         case .sleep:
             img = frame("sleep", stTicks / 8)
-            // просыпается сам, КОГДА ВЫСПАЛСЯ; либо его можно РАЗБУДИТЬ МЫШКОЙ (курсор движется рядом).
             let m = NSEvent.mouseLocation
             let poke = abs(m.x - x) < SIZE && abs(m.y - y) < SIZE * 1.5 && mouseDelta > 3
-            if energy >= 0.92 { decide() }                  // выспался — встал сам
-            else if poke { enter(.idle) }                   // разбудили мышкой недоспавшим — встанет, походит и снова заснёт
+            if poke {
+                enter(.idle)                                // РАЗБУДИЛИ МЫШКОЙ (курсор движется рядом)
+            } else if bedtimeNow {
+                // ночью спит подолгу и по энергии НЕ просыпается; ОЧЕНЬ редко встанет ненадолго пройтись
+                if stTicks > 600 && Double.random(in: 0..<1) < 0.0001 { targetX = randomX(); enter(.walk) }
+            } else if energy >= 0.92 {
+                decide()                                    // днём выспался — встал сам
+            }
         case .hunt:
             if stTicks < 7 {                                // присел перед прыжком
                 img = frame("alert", 0)
