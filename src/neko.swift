@@ -183,16 +183,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = makeCatIcon()
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Насыпать корм (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Погулять (уйти за стену)", action: #selector(walkMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Pour kibble (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Go for a walk", action: #selector(walkMenu), keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Проверить обновления", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
-        let autoItem = NSMenuItem(title: "Автообновление", action: #selector(toggleAutoUpdate), keyEquivalent: "")
+        menu.addItem(NSMenuItem(title: "Check for updates", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
+        let autoItem = NSMenuItem(title: "Auto-update", action: #selector(toggleAutoUpdate), keyEquivalent: "")
         autoItem.state = autoUpdate ? .on : .off
         menu.addItem(autoItem)
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "About Neko", action: #selector(aboutMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Neko \(VERSION)", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Выход", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
 
         registerFoodHotkey()
@@ -467,6 +468,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func checkUpdatesMenu() { checkForUpdates(manual: true) }
 
+    @objc func aboutMenu() {
+        let a = NSAlert()
+        a.messageText = "Neko \(VERSION)"
+        a.informativeText = """
+        A calm desktop cat for macOS.
+
+        The cat sprite is the classic “oneko” / Neko (1989 Macintosh desk accessory and \
+        the X11 oneko). Sprite sheet from adryd325/oneko.js — all credit for the artwork \
+        goes to its original authors.
+        """
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "oneko.js on GitHub")
+        if a.runModal() == .alertSecondButtonReturn,
+           let url = URL(string: "https://github.com/adryd325/oneko.js") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc func toggleAutoUpdate(_ sender: NSMenuItem) {
         autoUpdate.toggle()
         sender.state = autoUpdate ? .on : .off
@@ -481,7 +500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String else {
-                if manual { DispatchQueue.main.async { self.alert("Не удалось проверить обновления") } }
+                if manual { DispatchQueue.main.async { self.alert("Couldn't check for updates") } }
                 return
             }
             let assets = json["assets"] as? [[String: Any]] ?? []
@@ -492,13 +511,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.installUpdate(zip)
                     } else {
                         let a = NSAlert()
-                        a.messageText = "Вышла новая версия \(tag)"
-                        a.informativeText = "Обновить Neko сейчас?"
-                        a.addButton(withTitle: "Обновить"); a.addButton(withTitle: "Позже")
+                        a.messageText = "A new version \(tag) is available"
+                        a.informativeText = "Update Neko now?"
+                        a.addButton(withTitle: "Update"); a.addButton(withTitle: "Later")
                         if a.runModal() == .alertFirstButtonReturn { self.installUpdate(zip) }
                     }
                 } else if manual {
-                    self.alert("У вас последняя версия (\(VERSION))")
+                    self.alert("You're on the latest version (\(VERSION))")
                 }
             }
         }.resume()
