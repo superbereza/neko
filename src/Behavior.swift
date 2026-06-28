@@ -169,7 +169,8 @@ extension AppDelegate {
 
     // Восприятие окружения: мышь прямо НАД котом в зоне досягаемости → вертикальный подскок.
     func perceive() {
-        guard huntCool == 0, !eating, !toFood, !goingAway, !leaving,
+        guard mood == .playful,                       // охотится только в игривом настроении
+              huntCool == 0, !eating, !toFood, !goingAway, !leaving,
               st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
         let m = NSEvent.mouseLocation
         let above = m.y - y                         // насколько мышь выше кота
@@ -328,8 +329,9 @@ extension AppDelegate {
                 hopOffset = CGFloat(sin(Double(stTicks - 7) / 10.0 * .pi)) * huntHopH
                 img = frame("fall", anim / 2)               // лапы врастопырку — в прыжке
                 let m = NSEvent.mouseLocation
-                if abs(m.x - x) < 45 && abs(m.y - (y + hopOffset)) < 55 {   // достал курсор — цепляется!
+                if abs(m.x - x) < 40 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // допрыгнул до курсора — цепляется!
                     clinging = true; hopOffset = 0
+                    clingPrevX = m.x; clingAngle = 0; clingVel = 0
                 }
             } else {                                        // приземлился
                 hopOffset = 0; huntCool = 12

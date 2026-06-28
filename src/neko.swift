@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.6"
+let VERSION = "1.0.7"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -44,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var huntCool = 0               // кулдаун между прыжками
     var hoverTicks = 0             // сколько мышь висит над котом (нужно «зависание», не пролёт)
     var clinging = false           // висит на курсоре
+    var clingPrevX: CGFloat = 0    // прошлый x курсора (для раскачки)
+    var clingAngle: CGFloat = 0    // угол маятника
+    var clingVel: CGFloat = 0      // угловая скорость маятника
     var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
     var toFood = false         // спешит к корму
     var yarn: Yarn?            // клубок (одна штука), кот за ним гоняется
@@ -268,12 +271,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             x = m.x
             fallY = m.y - SIZE * 0.35
             fallVx = 0; fallVy = 0
+            clingAngle = 0; clingVel = 0
+            iv.frameCenterRotation = 0
             st = .falling
             return
         }
+        // маятник: рывок курсора раскачивает, «гравитация» тянет к вертикали, затухание
+        let dx = m.x - clingPrevX; clingPrevX = m.x
+        clingVel += -dx * 0.6
+        clingVel += -clingAngle * 0.15
+        clingVel *= 0.9
+        clingAngle = max(-50, min(50, clingAngle + clingVel))
         x = m.x
-        win.setFrameOrigin(NSPoint(x: m.x - SIZE / 2, y: m.y - SIZE * 0.85))  // болтается под курсором
-        iv.image = frame("held", anim / 3)
+        win.setFrameOrigin(NSPoint(x: m.x - SIZE / 2, y: m.y - SIZE * 0.85))  // висит под курсором
+        iv.frameCenterRotation = clingAngle
+        iv.image = frame("fall", anim / 2)   // вытянутые лапы — как в прыжке
         anim += 1
     }
 
