@@ -11,6 +11,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O src/neko.swift -o "$APP/Contents/MacOS/Neko"
 cp assets/oneko.png "$APP/Contents/Resources/oneko.png"
+[ -f assets/neko.icns ] && cp assets/neko.icns "$APP/Contents/Resources/neko.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -20,6 +21,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>            <string>Neko</string>
     <key>CFBundleIdentifier</key>      <string>local.neko</string>
     <key>CFBundleExecutable</key>      <string>Neko</string>
+    <key>CFBundleIconFile</key>        <string>neko</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleVersion</key>         <string>$VER</string>
     <key>CFBundleShortVersionString</key><string>$VER</string>
