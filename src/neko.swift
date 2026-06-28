@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.8"
+let VERSION = "1.0.9"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -42,12 +42,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var zoomReps = 0           // сколько ещё рывков «носиться»
     var huntHopH: CGFloat = 60     // высота вертикального прыжка-охоты (к курсору над котом)
     var huntCool = 0               // кулдаун между прыжками
-    var huntWillCatch = false      // в этот прыжок зацепится (иначе промахнётся, даже если достал)
     var hoverTicks = 0             // сколько мышь висит над котом (нужно «зависание», не пролёт)
     var clinging = false           // висит на курсоре
     var clingPrevX: CGFloat = 0    // прошлый x курсора (для раскачки)
     var clingAngle: CGFloat = 0    // угол маятника
     var clingVel: CGFloat = 0      // угловая скорость маятника
+    var flySpin: CGFloat = 0       // закрутка в полёте (после срыва с раскачки)
+    var flyRot: CGFloat = 0        // накопленный угол вращения в полёте
+    var clingTicks = 0             // сколько висит (чтобы не срывался мгновенно при зацепе)
+    var clingPivotV: CGFloat = 0   // скорость пивота-курсора (для ускорения подвеса)
     var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
     var toFood = false         // спешит к корму
     var yarn: Yarn?            // клубок (одна штука), кот за ним гоняется
@@ -85,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         "sleep":   [(2, 0), (2, 1)],
         "held":    [(3, 1), (5, 2)],            // болтается ногами при переносе
         "fall":    [(1, 2), (1, 3)],            // барахтается лапками в падении
+        "hang":    [(1, 2)],                    // висит на курсоре — вытянутые лапы
         "eat":     [(7, 2)],                    // ест сверху (голова вниз)
         "digL":    [(4, 0), (4, 1)],            // копает стену слева
         "digR":    [(2, 2), (2, 3)],            // копает стену справа
@@ -253,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: перетаскивание
-    func dragBegan() { dragging = true; clinging = false; eating = false; eatingRef = nil; iv.image = frame("held", 0) }
+    func dragBegan() { dragging = true; clinging = false; flySpin = 0; flyRot = 0; eating = false; eatingRef = nil; iv.image = frame("held", 0) }
     func dragEnded() {
         dragging = false
         x = win.frame.origin.x + SIZE / 2
@@ -263,30 +267,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         st = .falling                           // мягко приземлится на лапы (без отскока)
     }
 
-    // Висит на курсоре: следует за мышью; отваливается, если поднять выше нижней трети экрана.
+    // Висит на курсоре как настоящий маятник с движущимся подвесом:
+    //   θ'' = −(g/L)·sinθ − (a_пивота/L)·cosθ − c·θ'   (полу-неявный Эйлер)
+    // Срывается, если поднять выше нижней трети ИЛИ сильно раскачать (улетает по параболе, крутясь).
     func clingStep() {
         let s = NSScreen.main ?? NSScreen.screens[0]
         let m = NSEvent.mouseLocation
-        if m.y > s.frame.minY + s.frame.height / 3 {   // подняли высоко — срывается и падает
+        clingTicks += 1
+        let dt = CGFloat(TICK)
+        let L = SIZE * 0.5                                   // длина «нити» (курсор → центр кота)
+        let g: CGFloat = 800                                // «гравитация» (период ≈ 1.3 c)
+        let damp: CGFloat = 2.0                             // сопротивление воздуха
+
+        // ускорение подвеса (курсора)
+        let pivotV = (m.x - clingPrevX) / dt
+        let pivotA = (pivotV - clingPivotV) / dt
+        clingPrevX = m.x; clingPivotV = pivotV
+
+        let th = Double(clingAngle)
+        let acc = -(g / L) * CGFloat(sin(th)) - (pivotA / L) * CGFloat(cos(th)) - damp * clingVel
+        clingVel += acc * dt                                // θ' (рад/с)
+        clingAngle = max(-1.5, min(1.5, clingAngle + clingVel * dt))
+
+        let cx = m.x + L * CGFloat(sin(Double(clingAngle)))
+        let cy = m.y - L * CGFloat(cos(Double(clingAngle)))
+
+        // сильно раскачали → срывается и летит по параболе, закручиваясь
+        if clingTicks > 12 && abs(clingVel) > 7 {
             clinging = false
-            x = m.x
-            fallY = m.y - SIZE * 0.35
-            fallVx = 0; fallVy = 0
-            clingAngle = 0; clingVel = 0
+            x = cx; fallY = cy
+            let tang = clingVel * L * dt                     // тангенциальная скорость (px/тик)
+            fallVx = tang * CGFloat(cos(Double(clingAngle)))
+            fallVy = -tang * CGFloat(sin(Double(clingAngle)))
+            flySpin = clingVel * 1.5                         // закрутка в воздухе
+            st = .falling
+            return
+        }
+        // подняли выше трети экрана → просто отцепился (без закрутки)
+        if clingTicks > 4 && m.y > s.frame.minY + s.frame.height / 3 {
+            clinging = false
+            x = cx; fallY = cy; fallVx = 0; fallVy = 0; flySpin = 0
             iv.frameCenterRotation = 0
             st = .falling
             return
         }
-        // маятник: рывок курсора раскачивает, «гравитация» тянет к вертикали, затухание
-        let dx = m.x - clingPrevX; clingPrevX = m.x
-        clingVel += -dx * 0.6
-        clingVel += -clingAngle * 0.15
-        clingVel *= 0.9
-        clingAngle = max(-50, min(50, clingAngle + clingVel))
-        x = m.x
-        win.setFrameOrigin(NSPoint(x: m.x - SIZE / 2, y: m.y - SIZE * 0.85))  // висит под курсором
-        iv.frameCenterRotation = clingAngle
-        iv.image = frame("fall", anim / 2)   // вытянутые лапы — как в прыжке
+        x = cx
+        win.setFrameOrigin(NSPoint(x: cx - SIZE / 2, y: cy - SIZE / 2))
+        // поворот спрайта вокруг ЦЕНТРА на θ → верхняя точка (между лапами) попадает в курсор-пивот
+        iv.frameCenterRotation = clingAngle * 180 / CGFloat.pi
+        iv.image = frame("hang", 0)                          // висит с вытянутыми лапами
         anim += 1
     }
 
@@ -313,9 +342,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if x < lo { x = lo; fallVx = 0 } // о стену — гасим, не отскакиваем
             if x > hi { x = hi; fallVx = 0 }
             if fallY > top { fallY = top; if fallVy < 0 { fallVy = 0 } }   // не выше экрана
+            if flySpin != 0 {                    // закрутка в воздухе (после срыва с раскачки)
+                flyRot += flySpin; flySpin *= 0.97
+                iv.frameCenterRotation = flyRot
+            }
             if fallY <= ground {
                 fallY = ground
                 fallVx = 0
+                flySpin = 0; flyRot = 0; iv.frameCenterRotation = 0   // приземлился — выпрямился
                 enter(.idle)
                 iv.image = frame("idle", 0)
             } else {

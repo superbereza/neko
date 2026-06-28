@@ -179,7 +179,6 @@ extension AppDelegate {
             if hoverTicks >= 6 {                    // мышь именно ЗАВИСЛА (~0.6с), а не пролетела
                 hoverTicks = 0
                 huntHopH = min(above, 150)          // подпрыгнуть к ней (с потолком; выше — не достанет)
-                huntWillCatch = Double.random(in: 0..<1) < 0.6   // иногда промахнётся, даже если достал
                 enter(.hunt)
             }
         } else {
@@ -333,9 +332,10 @@ extension AppDelegate {
                 hopOffset = CGFloat(sin(Double(stTicks - 7) / 10.0 * .pi)) * huntHopH
                 img = frame("fall", anim / 2)               // лапы врастопырку — в прыжке
                 let m = NSEvent.mouseLocation
-                if huntWillCatch && abs(m.x - x) < 40 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // достал И повезло
-                    clinging = true; hopOffset = 0
-                    clingPrevX = m.x; clingAngle = 0; clingVel = 0
+                if abs(m.x - x) < 30 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // достал курсор (промах — только если увёл мышь)
+                    clinging = true
+                    clingPrevX = m.x; clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
+                    return                       // сразу висим — без кадра «на земле»
                 }
             } else {                                        // приземлился
                 hopOffset = 0; huntCool = 12
