@@ -4,7 +4,8 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p assets
-swift scripts/render-icon.swift assets/icon_1024.png
+BG="${1:-pink}"   # фон иконки: pink (по умолчанию) / white / clear / purple / blue / mint / dark / yellow / peach
+swift scripts/render-icon.swift assets/icon_1024.png "$BG"
 SET="$(mktemp -d)/neko.iconset"; mkdir -p "$SET"
 for sz in 16 32 64 128 256 512; do
   sips -z $sz $sz assets/icon_1024.png --out "$SET/icon_${sz}x${sz}.png" >/dev/null

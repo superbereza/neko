@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.3"
+let VERSION = "1.0.4"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -107,7 +107,19 @@ final class Kibble {
     }
 }
 
-enum St { case sleep, idle, walk, digging, away, falling, zoomies }
+enum St { case sleep, idle, walk, digging, away, falling, zoomies
+    var label: String {
+        switch self {
+        case .sleep:   return "sleeping"
+        case .idle:    return "idle"
+        case .walk:    return "walking"
+        case .digging: return "digging"
+        case .away:    return "away (out)"
+        case .falling: return "falling"
+        case .zoomies: return "zoomies"
+        }
+    }
+}
 
 enum Mood: String, CaseIterable {
     case playful, lazy, curious, hungry, normal
@@ -119,7 +131,7 @@ enum Mood: String, CaseIterable {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var win: NSWindow!
     let iv = NekoView()
     var sheet: NSImage!
@@ -132,14 +144,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var eating = false
     var dragging = false
     var kibbles: [Kibble] = []
-    let FALL: CGFloat = 22          // скорость падения корма
     let FOOT: CGFloat = 8           // насколько опустить кота к самой кромке
     var goingAway = false
     var leaving = false
     var awayLeft = false
     var fallVy: CGFloat = 0     // вертикальная скорость при падении
     var fallY: CGFloat = 0
-    var hunger = 0             // тиков без еды
+    var hunger = 0.0          // 0..1 — растёт со временем, обнуляется едой (~15 мин до макс.)
     var energy = 0.7           // 0..1 — растёт во сне, тратится в активности
     var boredom = 0.3          // 0..1 — растёт в покое, падает от движения
     var zoomReps = 0           // сколько ещё рывков «носиться»
@@ -148,10 +159,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни
     let FOOD_SPEED: CGFloat = 9 // скорость к корму
+    let SATIATION = 0.34        // насколько один катышек утоляет голод (0..1)
+    let EAT_HUNGER = 0.15       // ниже этого голода кот уже не идёт к корму
     var statusItem: NSStatusItem!
     var hotKeyRef: EventHotKeyRef?
     var pourTimer: Timer?
     var mood: Mood = .normal     // настроение дня (меняет поведение)
+    // дебаг доступен только при спец-запуске: open Neko.app --args --debug  /  NEKO_DEBUG=1
+    let debugBuild = CommandLine.arguments.contains("--debug")
+        || ProcessInfo.processInfo.environment["NEKO_DEBUG"] == "1"
+    var debug = UserDefaults.standard.bool(forKey: "neko.debug")  // показывать ли строки (внутри дебаг-секции)
+    var dbgToggle: NSMenuItem!
+    var dbgItems: [NSMenuItem] = []
+    var dbgState: NSMenuItem!, dbgEnergy: NSMenuItem!, dbgBoredom: NSMenuItem!
+    var dbgHunger: NSMenuItem!, dbgMood: NSMenuItem!
 
     let sets: [String: [(Int, Int)]] = [
         "idle":    [(3, 3)],
@@ -207,10 +228,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(autoItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "About Neko", action: #selector(aboutMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Today's mood: \(mood.label)", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Today's mood: \(mood.label)", action: nil, keyEquivalent: ""))  // приятная строка для всех
         menu.addItem(NSMenuItem(title: "Neko \(VERSION)", action: nil, keyEquivalent: ""))
+
+        // Дебаг-секция — ТОЛЬКО при спец-запуске (--debug / NEKO_DEBUG=1). В обычной сборке её нет.
+        if debugBuild {
+            menu.addItem(.separator())
+            dbgToggle = NSMenuItem(title: "Debug info", action: #selector(toggleDebug), keyEquivalent: "")
+            dbgToggle.state = debug ? .on : .off
+            menu.addItem(dbgToggle)
+            dbgState   = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            dbgEnergy  = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            dbgBoredom = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            dbgHunger  = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            dbgMood    = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            dbgItems = [dbgState, dbgEnergy, dbgBoredom, dbgHunger, dbgMood]
+            for it in dbgItems { it.isEnabled = false; it.isHidden = !debug; menu.addItem(it) }
+            let copyItem = NSMenuItem(title: "Copy state", action: #selector(copyDebugState), keyEquivalent: "")
+            copyItem.isHidden = !debug
+            dbgItems.append(copyItem)   // прячется/показывается вместе с дебагом
+            menu.addItem(copyItem)
+        }
+
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.delegate = self
         statusItem.menu = menu
+        refreshDebug()
 
         registerFoodHotkey()
         enter(.sleep)
@@ -229,12 +273,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Значок менюбара — голова кота, вырезанная из кадра (3,3) спрайта
     func makeCatIcon() -> NSImage {
-        let src = NSRect(x: 99, y: 14, width: 24, height: 17)   // область головы в oneko.png
-        let h: CGFloat = 19, w = h * (src.width / src.height)
+        // голова с замкнутым снизу контуром, line-art template (как иконка приложения)
+        guard let rep = NSBitmapImageRep(data: sheet.tiffRepresentation!) else { return NSImage() }
+        let yTop = 99, yBot = 113, xL = 100, xR = 125
+        let hw = xR - xL, hh = yBot - yTop + 1
+        func px(_ x: Int, _ y: Int) -> Int {   // 0 пусто, 1 белый, 2 чёрный
+            guard x >= 0, y >= 0, x < rep.pixelsWide, y < rep.pixelsHigh, let c = rep.colorAt(x: x, y: y) else { return 0 }
+            if c.alphaComponent < 0.4 { return 0 }
+            let lum = 0.3*c.redComponent + 0.59*c.greenComponent + 0.11*c.blueComponent
+            return lum < 0.5 ? 2 : 1
+        }
+        var g = Array(repeating: Array(repeating: 0, count: hw), count: hh + 1)
+        for ry in 0..<hh { for rx in 0..<hw { g[ry][rx] = px(xL + rx, yTop + ry) } }
+        for ry in 0..<hh { for rx in 0..<hw where g[ry][rx] == 1 {   // замкнуть низ
+            if g[ry + 1][rx] == 0 { g[ry + 1][rx] = 2 }
+        }}
+        var minX = hw, maxX = 0, minY = hh + 1, maxY = 0
+        for y in 0..<(hh+1) { for x in 0..<hw where g[y][x] != 0 {
+            minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+        }}
+        let cw = maxX - minX + 1, ch = maxY - minY + 1
+        // мелкая 1:1 картинка с заливкой (белый кот + чёрный контур), потом масштаб nearest
+        let small = NSImage(size: NSSize(width: cw, height: ch))
+        small.lockFocus()
+        for y in 0..<ch { for x in 0..<cw {
+            let v = g[minY + y][minX + x]
+            if v == 0 { continue }
+            (v == 2 ? NSColor.black : NSColor.white).setFill()
+            NSRect(x: CGFloat(x), y: CGFloat(ch - 1 - y), width: 1, height: 1).fill()
+        }}
+        small.unlockFocus()
+        let h: CGFloat = 18, w = h * CGFloat(cw) / CGFloat(ch)
         let img = NSImage(size: NSSize(width: w, height: h))
         img.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .none
-        sheet.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: src, operation: .sourceOver, fraction: 1)
+        small.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
         img.unlockFocus()
         return img
     }
@@ -264,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: перетаскивание
-    func dragBegan() { dragging = true; iv.image = frame("held", 0) }
+    func dragBegan() { dragging = true; eating = false; eatingRef = nil; iv.image = frame("held", 0) }
     func dragEnded() {
         dragging = false
         x = win.frame.origin.x + SIZE / 2
@@ -276,6 +349,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: состояние
     func enter(_ s: St) {
         st = s; stTicks = 0
+        // гасим несовместимые намерения, чтобы не возникало невозможных комбинаций
+        switch s {
+        case .sleep, .zoomies:                       // никаких миссий
+            toFood = false; goingAway = false; leaving = false; eating = false; eatingRef = nil
+        case .idle:                                  // idle не «уходит»; еда выставляется отдельно после прихода
+            goingAway = false; leaving = false
+        case .walk:                                  // на ходу не грызём (toFood/goingAway ставит вызывающий)
+            eating = false; eatingRef = nil
+        case .digging, .away, .falling:
+            break                                    // управляются своей логикой
+        }
         switch s {
         case .sleep:   stDur = Int.random(in: 600...1600)
         case .idle:    stDur = Int.random(in: 40...110)
@@ -295,10 +379,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func decideNext() {
-        toFood = false
-        if let c = pileCenter() { toFood = true; targetX = c; enter(.walk); return }  // корм важнее всего
+        toFood = false; goingAway = false; leaving = false   // свежее решение — без залипших намерений
+        if hunger > EAT_HUNGER, let c = pileCenter() {   // идёт к корму только если голоден
+            toFood = true; targetX = c; enter(.walk); return
+        }
 
-        let hN = min(1.0, Double(hunger) / 9000.0)          // 0..1 — насколько голоден (15 мин = совсем)
+        let hN = hunger                                     // 0..1 — насколько голоден
         let hour = Calendar.current.component(.hour, from: Date())
         let night = hour >= 23 || hour < 6                  // ночью спит крепче
         let crep = (hour >= 6 && hour < 9) || (hour >= 18 && hour < 22)  // сумерки — пик активности
@@ -319,10 +405,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let weights: [(St, Double)] = [(.sleep, wSleep), (.walk, wWalk), (.zoomies, wZoom), (.idle, wIdle)]
-        let total = weights.reduce(0) { $0 + $1.1 }
-        var r = Double.random(in: 0..<total)
+        let total = weights.reduce(0) { $0 + max(0, $1.1) }
         var pick = St.idle
-        for (s, w) in weights { if r < w { pick = s; break }; r -= w }
+        if total > 0 {                                  // гард: пустой/некорректный набор весов → idle
+            var r = Double.random(in: 0..<total)
+            for (s, w) in weights { if r < max(0, w) { pick = s; break }; r -= max(0, w) }
+        }
 
         let awayChance = (mood == .curious) ? 0.16 : 0.07       // любопытный чаще уходит «за стену»
         switch pick {
@@ -369,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         y = bottomY()
         stTicks += 1
-        hunger += (mood == .hungry ? 2 : 1)   // голодное настроение — быстрее хочет есть
+        hunger = min(1, hunger + (mood == .hungry ? 0.00022 : 0.00011))  // голодное настроение — быстрее
 
         // потребности: энергия и скука дрейфуют по состоянию
         switch st {
@@ -380,12 +468,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // корм всегда привлекает — прерывает беготню/ходьбу/сидение (но не сон/уход)
-        if !kibbles.isEmpty && !eating && !goingAway && !leaving, let c = pileCenter() {
+        if hunger > EAT_HUNGER && !eating && !goingAway && !leaving, let c = pileCenter() {
             switch st {
-            case .zoomies, .walk, .idle:
-                if st != .walk || abs((targetX ?? x) - c) > 6 {
-                    goingAway = false; toFood = true; targetX = c; enter(.walk)
-                }
+            case .walk:
+                toFood = true; targetX = c          // уже идём — только правим цель, анимацию не сбрасываем
+            case .zoomies, .idle:
+                toFood = true; targetX = c; enter(.walk)
             default: break
             }
         }
@@ -416,7 +504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
             } else {
                 x += dx > 0 ? sp : -sp
-                img = frame(dx > 0 ? "E" : "W", stTicks / 3)
+                img = frame(dx > 0 ? "E" : "W", anim / 3)   // свободный счётчик — не застывает при смене цели
             }
         case .digging:
             img = frame(awayLeft ? "digL" : "digR", stTicks / 5)   // копает дырку
@@ -437,19 +525,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         case .idle:
             if eating {
-                if let k = eatingRef, k.landed, !k.dragging {   // ест только лежащий, не схваченный
+                if let k = eatingRef, k.landed, !k.dragging, abs(k.x - x) <= SIZE / 2 {   // лежит рядом, не схвачен
                     img = frame("eat", 0)
                     biteTick += 1
                     if biteTick >= 16 {             // очередной укус
                         biteTick = 0
                         k.eaten += 1
+                        hunger = max(0, hunger - SATIATION / Double(k.maxBites))  // сытость от каждого укуса
                         k.dot.stage = min(KibbleDot.stages.count - 1,
                                           Int(Double(k.eaten) / Double(k.maxBites) * Double(KibbleDot.stages.count)))
                         if k.eaten >= k.maxBites {  // доел этот катышек
                             k.win.orderOut(nil)
                             kibbles.removeAll { $0 === k }
-                            eatingRef = nil; eating = false; hunger = 0
-                            decideNext()
+                            eatingRef = nil; eating = false
+                            decideNext()           // голоден ещё? — пойдёт к следующему катышку
                         }
                     }
                 } else {                            // схватили/улетел — перестаём есть
@@ -519,6 +608,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoUpdate.toggle()
         sender.state = autoUpdate ? .on : .off
     }
+
+    @objc func toggleDebug() {
+        debug.toggle()
+        UserDefaults.standard.set(debug, forKey: "neko.debug")
+        dbgToggle.state = debug ? .on : .off
+        for it in dbgItems { it.isHidden = !debug }
+        refreshDebug()
+    }
+
+    @objc func copyDebugState() {
+        let s = """
+        neko \(VERSION)
+        state: \(st.label)
+        energy: \(String(format: "%.2f", energy))
+        boredom: \(String(format: "%.2f", boredom))
+        hunger: \(String(format: "%.2f", hunger))
+        mood: \(mood.label)
+        """
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+    }
+
+    func refreshDebug() {
+        guard debugBuild, debug, dbgState != nil else { return }
+        dbgState.title   = "state: \(st.label)"
+        dbgEnergy.title  = String(format: "energy: %.2f", energy)
+        dbgBoredom.title = String(format: "boredom: %.2f", boredom)
+        dbgHunger.title  = String(format: "hunger: %.2f", hunger)
+        dbgMood.title    = "mood: \(mood.label)"
+    }
+
+    // обновляем дебаг-цифры в момент открытия меню
+    func menuWillOpen(_ menu: NSMenu) { refreshDebug() }
 
     func checkForUpdates(manual: Bool = false) {
         let url = URL(string: "https://api.github.com/repos/\(REPO)/releases/latest")!
@@ -598,9 +721,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func restoreState() {
         let d = UserDefaults.standard
         if d.object(forKey: "neko.energy") != nil {
-            energy = d.double(forKey: "neko.energy")
-            boredom = d.double(forKey: "neko.boredom")
-            hunger = d.integer(forKey: "neko.hunger")
+            energy = min(1, max(0, d.double(forKey: "neko.energy")))
+            boredom = min(1, max(0, d.double(forKey: "neko.boredom")))
+            hunger = min(1, max(0, d.double(forKey: "neko.hunger")))   // старое сохранение могло быть сырым счётчиком
             if let xx = d.object(forKey: "neko.x") as? Double { x = CGFloat(xx) }
         }
         if let arr = d.array(forKey: "neko.kibbles") as? [[String: Any]] {
@@ -615,6 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ n: Notification) { saveState() }
 
     func startWalkabout() {        // уйти гулять за стену (вызывается сам / для демо)
+        guard !goingAway && !leaving, st != .away, st != .digging, st != .falling else { return }
         goingAway = true; toFood = false; awayLeft = Bool.random()
         targetX = awayLeft ? leftEdge() : rightEdge()
         enter(.walk)
