@@ -12,147 +12,6 @@ let SIZE = CGFloat(CELL) * SCALE      // 64
 let SPEED: CGFloat = 4                // мягкая походка
 let TICK = 0.1
 
-final class NekoWindow: NSWindow {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
-}
-
-// Кот: ловит перетаскивание
-final class NekoView: NSImageView {
-    var began: (() -> Void)?
-    var moved: ((CGPoint) -> Void)?
-    var ended: (() -> Void)?
-    var throwVel = CGPoint.zero       // скорость броска (для параболы при отпускании)
-    private var lastMouse = NSPoint.zero
-    override func mouseDown(with e: NSEvent) {
-        lastMouse = NSEvent.mouseLocation
-        throwVel = .zero
-        began?()
-    }
-    override func mouseDragged(with e: NSEvent) {
-        let m = NSEvent.mouseLocation
-        throwVel = CGPoint(x: m.x - lastMouse.x, y: m.y - lastMouse.y)   // мгновенная скорость руки
-        lastMouse = m
-        // курсор держит кота за фиксированную точку (за «попу» сверху), тело свисает
-        let o = NSPoint(x: m.x - bounds.width / 2, y: m.y - bounds.height * 0.85)
-        window?.setFrameOrigin(o)
-        let angle = max(-30, min(30, -Double(e.deltaX) * 1.4))   // маятник
-        frameCenterRotation = angle
-        moved?(o)
-    }
-    override func mouseUp(with e: NSEvent) {
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.25
-            animator().frameCenterRotation = 0
-        }
-        ended?()
-    }
-}
-
-// Катышек корма — пиксель-арт, 4 стадии «надкусанности»
-final class KibbleDot: NSView {
-    static let stages: [[String]] = [
-        [ "..###..", ".#WWW#.", "#WWWWW#", "#WWWWW#", "#WWWWW#", ".#WWW#.", "..###.." ], // целый
-        [ ".......", "..#.#..", "#WWWWW#", "#WWWWW#", "#WWWWW#", ".#WWW#.", "..###.." ], // верх надкушен
-        [ ".......", ".......", ".......", "#W#.#W#", "#WWWWW#", ".#WWW#.", "..###.." ], // половина сверху
-        [ ".......", ".......", ".......", ".......", ".......", "..#.#..", "..###.." ], // крошка снизу
-    ]
-    var stage = 0 { didSet { needsDisplay = true } }
-    var onBegan: (() -> Void)?
-    var onMoved: ((CGPoint) -> Void)?
-    var onEnded: (() -> Void)?
-    private var startMouse = NSPoint.zero, startOrigin = NSPoint.zero
-    override func mouseDown(with e: NSEvent) {
-        startMouse = NSEvent.mouseLocation
-        startOrigin = window?.frame.origin ?? .zero
-        onBegan?()
-    }
-    override func mouseDragged(with e: NSEvent) {
-        let m = NSEvent.mouseLocation
-        let o = NSPoint(x: startOrigin.x + (m.x - startMouse.x), y: startOrigin.y + (m.y - startMouse.y))
-        window?.setFrameOrigin(o); onMoved?(o)
-    }
-    override func mouseUp(with e: NSEvent) { onEnded?() }
-
-    override func draw(_ r: NSRect) {
-        let rows = KibbleDot.stages[min(stage, KibbleDot.stages.count - 1)]
-        let h = rows.count, w = 7
-        let cell = floor(min(bounds.width / CGFloat(w), bounds.height / CGFloat(h)))
-        let ox = (bounds.width - cell * CGFloat(w)) / 2
-        let oy = (bounds.height - cell * CGFloat(h)) / 2
-        for (ri, row) in rows.enumerated() {
-            for (ci, ch) in row.enumerated() {
-                let color: NSColor? = ch == "#" ? .black : (ch == "W" ? .white : nil)
-                guard let c = color else { continue }
-                c.setFill()
-                NSRect(x: ox + CGFloat(ci) * cell, y: oy + CGFloat(h - 1 - ri) * cell,
-                       width: cell, height: cell).fill()
-            }
-        }
-    }
-}
-
-final class Kibble {
-    let win: NSWindow
-    let dot: KibbleDot
-    var x: CGFloat          // центр по X
-    var y: CGFloat          // origin окна по Y
-    var vx: CGFloat = 0     // скорость (инерция)
-    var vy: CGFloat = 0
-    var landed = false
-    var dragging = false    // тащат мышью
-    var canEscape = false   // можно ли вылететь за экран (бросок из верхней половины)
-    var eaten = 0           // сколько откусано
-    let maxBites: Int       // за сколько укусов исчезнет
-    init(win: NSWindow, dot: KibbleDot, x: CGFloat, y: CGFloat, maxBites: Int) {
-        self.win = win; self.dot = dot; self.x = x; self.y = y; self.maxBites = maxBites
-    }
-}
-
-enum St { case sleep, idle, walk, digging, away, falling, zoomies
-    var label: String {
-        switch self {
-        case .sleep:   return "sleeping"
-        case .idle:    return "idle"
-        case .walk:    return "walking"
-        case .digging: return "digging"
-        case .away:    return "away (out)"
-        case .falling: return "falling"
-        case .zoomies: return "zoomies"
-        }
-    }
-}
-
-enum Mood: String, CaseIterable {
-    case playful, lazy, curious, hungry, normal
-    var label: String {
-        switch self {
-        case .playful: return "Playful"; case .lazy: return "Lazy"
-        case .curious: return "Curious"; case .hungry: return "Hungry"; case .normal: return "Normal"
-        }
-    }
-}
-
-// Движок поведения: решает «мозг + позу» за тик. Переключается в дебаге.
-// Физика корма, перетаскивание и падение — общие (в tick), движков не касаются.
-protocol CatEngine: AnyObject {
-    var label: String { get }
-    func step(_ app: AppDelegate)
-}
-// Текущее поведение — рефлексный агент: условие→действие, флаги + взвешенный рандом. Эталон.
-final class ReflexEngine: CatEngine {
-    let label = "reflex"
-    func step(_ app: AppDelegate) { app.reflexStep() }
-}
-// Новый движок — utility-агент: нужды + полезность + рутины. WIP: пока повторяет рефлекс.
-final class UtilityEngine: CatEngine {
-    let label = "utility"
-    func step(_ app: AppDelegate) { app.reflexStep() }   // TODO: заменить на needs+utility-мозг
-}
-func makeEngine(_ name: String) -> CatEngine {
-    name == "utility" ? UtilityEngine() : ReflexEngine()
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var win: NSWindow!
     let iv = NekoView()
@@ -177,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var energy = 0.7           // 0..1 — растёт во сне, тратится в активности
     var boredom = 0.3          // 0..1 — растёт в покое, падает от движения
     var zoomReps = 0           // сколько ещё рывков «носиться»
+    var huntHopH: CGFloat = 60     // высота вертикального прыжка-охоты (к курсору над котом)
+    var huntCool = 0               // кулдаун между прыжками
+    var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
     var toFood = false         // спешит к корму
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
@@ -248,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image = makeCatIcon()
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Pour kibble (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Clear food", action: #selector(clearFoodMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Go for a walk", action: #selector(walkMenu), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Check for updates", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
@@ -384,100 +247,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: состояние
-    func enter(_ s: St) {
-        st = s; stTicks = 0
-        // гасим несовместимые намерения, чтобы не возникало невозможных комбинаций
-        switch s {
-        case .sleep, .zoomies:                       // никаких миссий
-            toFood = false; goingAway = false; leaving = false; eating = false; eatingRef = nil
-        case .idle:                                  // idle не «уходит»; еда выставляется отдельно после прихода
-            goingAway = false; leaving = false
-        case .walk:                                  // на ходу не грызём (toFood/goingAway ставит вызывающий)
-            eating = false; eatingRef = nil
-        case .digging, .away, .falling:
-            break                                    // управляются своей логикой
-        }
-        switch s {
-        case .sleep:   stDur = Int.random(in: 600...1600)
-        case .idle:    stDur = Int.random(in: 40...110)
-        case .walk:    stDur = 0
-        case .digging: stDur = Int.random(in: 30...50)      // ~3–5 c копает
-        case .away:    stDur = Int.random(in: 1800...6000)  // 3–10 мин гуляет
-        case .falling: stDur = 0
-        case .zoomies: stDur = 0; zoomReps = Int.random(in: 5...10)
-                       targetX = Bool.random() ? leftEdge() : rightEdge()
-        }
-    }
-
-    // центр БЛИЖАЙШЕЙ кучки: внутри кучи усредняем (встаёт по центру),
-    // но между раздельными кучами не садится — идёт к ближайшей
-    func foodTargetX() -> CGFloat? {
-        let xs = kibbles.filter { $0.landed && !$0.dragging }.map { $0.x }.sorted()
-        guard !xs.isEmpty else { return nil }
-        var clusters: [[CGFloat]] = [[xs[0]]]
-        for v in xs.dropFirst() {
-            if v - clusters[clusters.count - 1].last! <= SIZE / 2 {   // тот же кластер
-                clusters[clusters.count - 1].append(v)
-            } else {
-                clusters.append([v])                                   // новая кучка
-            }
-        }
-        let centers = clusters.map { $0.reduce(0, +) / CGFloat($0.count) }
-        return centers.min(by: { abs($0 - x) < abs($1 - x) })
-    }
-
-    func decideNext() {
-        toFood = false; goingAway = false; leaving = false   // свежее решение — без залипших намерений
-        if hunger > EAT_HUNGER, let c = foodTargetX() {   // идёт к корму только если голоден
-            toFood = true; targetX = c; enter(.walk); return
-        }
-
-        let hN = hunger                                     // 0..1 — насколько голоден
-        let hour = Calendar.current.component(.hour, from: Date())
-        let night = hour >= 23 || hour < 6                  // ночью спит крепче
-        let crep = (hour >= 6 && hour < 9) || (hour >= 18 && hour < 22)  // сумерки — пик активности
-
-        // веса действий по потребностям и времени суток
-        var wSleep = (1.4 - energy) + (night ? 1.4 : 0.3)        // устал/ночь → спать
-        var wWalk = 0.5 + boredom * 0.9 + energy * 0.3          // скучно/бодр → бродить
-        var wZoom = max(0, boredom * energy * (0.4 + hN)) * (crep ? 2.0 : 0.5) // → носиться
-        var wIdle = 0.5                                         // посидеть/умыться
-
-        // настроение дня меняет акценты
-        switch mood {
-        case .playful: wZoom *= 2.2; wWalk *= 1.4; wSleep *= 0.7
-        case .lazy:    wSleep *= 1.7; wWalk *= 0.6; wZoom *= 0.4
-        case .curious: wWalk *= 1.8; wIdle *= 0.7
-        case .hungry:  wZoom *= 1.5; wWalk *= 1.2
-        case .normal:  break
-        }
-
-        let weights: [(St, Double)] = [(.sleep, wSleep), (.walk, wWalk), (.zoomies, wZoom), (.idle, wIdle)]
-        let total = weights.reduce(0) { $0 + max(0, $1.1) }
-        var pick = St.idle
-        if total > 0 {                                  // гард: пустой/некорректный набор весов → idle
-            var r = Double.random(in: 0..<total)
-            for (s, w) in weights { if r < max(0, w) { pick = s; break }; r -= max(0, w) }
-        }
-
-        let awayChance = (mood == .curious) ? 0.16 : 0.07       // любопытный чаще уходит «за стену»
-        switch pick {
-        case .zoomies:
-            enter(.zoomies)
-        case .walk:
-            if Double.random(in: 0..<1) < awayChance {          // своенравно уходит за стену
-                goingAway = true; awayLeft = Bool.random()
-                targetX = awayLeft ? leftEdge() : rightEdge()
-                enter(.walk)
-            } else {
-                targetX = randomX(); enter(.walk)
-            }
-        case .sleep:
-            enter(.sleep)
-        default:
-            enter(.idle)
-        }
-    }
 
     func tick() {
         updateKibbles()                     // корм падает всегда
@@ -513,120 +282,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engine.step(self)                   // мозг+поза: Reflex или Utility (физика/драг/падение — общие выше)
     }
 
-    // Текущее («рефлексное») поведение за один тик — мозг + поза. Эталон, его пиннят тесты.
-    func reflexStep() {
-        y = bottomY()
-        stTicks += 1
-        hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
-
-        // потребности: энергия и скука дрейфуют по состоянию
-        switch st {
-        case .sleep:           energy = min(1, energy + 0.0008); boredom = min(1, boredom + 0.0004)
-        case .walk, .zoomies:  energy = max(0, energy - 0.0016); boredom = max(0, boredom - 0.0025)
-        case .idle:            energy = min(1, energy + 0.0003); boredom = min(1, boredom + 0.0007)
-        default: break
-        }
-
-        // корм всегда привлекает — прерывает беготню/ходьбу/сидение (но не сон/уход)
-        if hunger > EAT_HUNGER && !eating && !goingAway && !leaving, let c = foodTargetX() {
-            switch st {
-            case .walk:
-                toFood = true; targetX = c          // уже идём — только правим цель, анимацию не сбрасываем
-            case .zoomies, .idle:
-                toFood = true; targetX = c; enter(.walk)
-            default: break
-            }
-        }
-
-        var img: NSImage
-        switch st {
-        case .zoomies:
-            let tx = targetX ?? x
-            let dx = tx - x
-            if abs(dx) <= ZOOM {
-                x = tx
-                zoomReps -= 1
-                if zoomReps <= 0 { enter(.idle); img = frame("idle", 0) }
-                else { targetX = (tx <= leftEdge() + 1) ? rightEdge() : leftEdge()
-                       img = frame(dx > 0 ? "E" : "W", anim) }
-            } else {
-                x += dx > 0 ? ZOOM : -ZOOM
-                img = frame(dx > 0 ? "E" : "W", anim)
-            }
-        case .walk:
-            let sp: CGFloat = toFood ? FOOD_SPEED : SPEED
-            let tx = targetX ?? x
-            let dx = tx - x
-            if abs(dx) <= sp {
-                x = tx
-                if leaving { leaving = false; win.orderOut(nil); enter(.away); img = frame("idle", 0) }
-                else if goingAway { enter(.digging); img = frame(awayLeft ? "digL" : "digR", 0) }
-                else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
-            } else {
-                x += dx > 0 ? sp : -sp
-                img = frame(dx > 0 ? "E" : "W", anim / 3)   // свободный счётчик — не застывает при смене цели
-            }
-        case .digging:
-            img = frame(awayLeft ? "digL" : "digR", stTicks / 5)   // копает дырку
-            if stTicks > stDur {                    // прокопал → уходит за край шагами
-                leaving = true; goingAway = false
-                targetX = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE
-                enter(.walk)
-            }
-        case .away:
-            img = frame("idle", 0)                  // не виден
-            if stTicks > stDur {                    // возвращается из-за края шагами
-                goingAway = false; leaving = false
-                x = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE
-                y = bottomY()
-                win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
-                win.orderFrontRegardless()
-                targetX = randomX(); toFood = false; enter(.walk)
-            }
-        case .idle:
-            if eating {
-                if let k = eatingRef, k.landed, !k.dragging, abs(k.x - x) <= SIZE / 2 {   // лежит рядом, не схвачен
-                    img = frame("eat", 0)
-                    biteTick += 1
-                    if biteTick >= 16 {             // очередной укус
-                        biteTick = 0
-                        k.eaten += 1
-                        hunger = max(0, hunger - SATIATION / Double(k.maxBites))  // сытость от каждого укуса
-                        k.dot.stage = min(KibbleDot.stages.count - 1,
-                                          Int(Double(k.eaten) / Double(k.maxBites) * Double(KibbleDot.stages.count)))
-                        if k.eaten >= k.maxBites {  // доел этот катышек
-                            k.win.orderOut(nil)
-                            kibbles.removeAll { $0 === k }
-                            eatingRef = nil; eating = false
-                            if hunger > FULL, let c = foodTargetX() {   // ещё не наелся и есть корм — к следующему
-                                toFood = true; targetX = c; enter(.walk)
-                            } else {
-                                decideNext()
-                            }
-                        }
-                    }
-                } else {                            // схватили/улетел — перестаём есть
-                    eating = false; eatingRef = nil; img = frame("idle", 0)
-                }
-            } else {
-                if stTicks > stDur / 4 && stTicks < stDur * 3 / 4 {
-                    img = frame("scratch", stTicks / 4)     // умывается
-                } else {
-                    img = frame("idle", 0)
-                }
-                if stTicks > stDur { decideNext() }
-            }
-        case .sleep:
-            img = frame("sleep", stTicks / 8)
-            if stTicks > stDur { decideNext() }             // ест только когда сам проснулся
-        case .falling:
-            img = frame("held", 0)                          // (обрабатывается выше)
-        }
-        iv.image = img
-        let drop: CGFloat = eating ? 6 : 0   // когда ест — садится ниже, чтоб попа не висела
-        win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2 - drop))
-        anim += 1
-    }
 
     @objc func walkMenu() { startWalkabout() }
 
@@ -822,6 +477,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: корм
     @objc func feedMenu() { dropKibble() }
 
+    @objc func clearFoodMenu() {
+        for k in kibbles { k.win.orderOut(nil) }
+        kibbles.removeAll()
+        eating = false; eatingRef = nil
+    }
+
     // высыпать один катышек из позиции курсора (падает на пол)
     func dropKibble() {
         if kibbles.count >= 80 { return }   // лимит, чтобы не наплодить окон
@@ -960,8 +621,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         RegisterEventHotKey(UInt32(kVK_ANSI_X), mods, id, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 }
-
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()

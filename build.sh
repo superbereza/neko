@@ -9,7 +9,7 @@ VER=$(grep -m1 'let VERSION' src/neko.swift | sed -E 's/.*"([0-9.]+)".*/\1/')
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O src/neko.swift -o "$APP/Contents/MacOS/Neko"
+swiftc -O src/*.swift -o "$APP/Contents/MacOS/Neko"
 cp assets/oneko.png "$APP/Contents/Resources/oneko.png"
 [ -f assets/neko.icns ] && cp assets/neko.icns "$APP/Contents/Resources/neko.icns"
 

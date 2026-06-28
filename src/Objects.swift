@@ -1,0 +1,137 @@
+import Cocoa
+
+final class NekoWindow: NSWindow {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+// Кот: ловит перетаскивание
+final class NekoView: NSImageView {
+    var began: (() -> Void)?
+    var moved: ((CGPoint) -> Void)?
+    var ended: (() -> Void)?
+    var throwVel = CGPoint.zero       // скорость броска (для параболы при отпускании)
+    private var lastMouse = NSPoint.zero
+    override func mouseDown(with e: NSEvent) {
+        lastMouse = NSEvent.mouseLocation
+        throwVel = .zero
+        began?()
+    }
+    override func mouseDragged(with e: NSEvent) {
+        let m = NSEvent.mouseLocation
+        throwVel = CGPoint(x: m.x - lastMouse.x, y: m.y - lastMouse.y)   // мгновенная скорость руки
+        lastMouse = m
+        // курсор держит кота за фиксированную точку (за «попу» сверху), тело свисает
+        let o = NSPoint(x: m.x - bounds.width / 2, y: m.y - bounds.height * 0.85)
+        window?.setFrameOrigin(o)
+        let angle = max(-30, min(30, -Double(e.deltaX) * 1.4))   // маятник
+        frameCenterRotation = angle
+        moved?(o)
+    }
+    override func mouseUp(with e: NSEvent) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.25
+            animator().frameCenterRotation = 0
+        }
+        ended?()
+    }
+}
+
+// Катышек корма — пиксель-арт, 4 стадии «надкусанности»
+final class KibbleDot: NSView {
+    static let stages: [[String]] = [
+        [ "..###..", ".#WWW#.", "#WWWWW#", "#WWWWW#", "#WWWWW#", ".#WWW#.", "..###.." ], // целый
+        [ ".......", "..#.#..", "#WWWWW#", "#WWWWW#", "#WWWWW#", ".#WWW#.", "..###.." ], // верх надкушен
+        [ ".......", ".......", ".......", "#W#.#W#", "#WWWWW#", ".#WWW#.", "..###.." ], // половина сверху
+        [ ".......", ".......", ".......", ".......", ".......", "..#.#..", "..###.." ], // крошка снизу
+    ]
+    var stage = 0 { didSet { needsDisplay = true } }
+    var onBegan: (() -> Void)?
+    var onMoved: ((CGPoint) -> Void)?
+    var onEnded: (() -> Void)?
+    private var startMouse = NSPoint.zero, startOrigin = NSPoint.zero
+    override func mouseDown(with e: NSEvent) {
+        startMouse = NSEvent.mouseLocation
+        startOrigin = window?.frame.origin ?? .zero
+        onBegan?()
+    }
+    override func mouseDragged(with e: NSEvent) {
+        let m = NSEvent.mouseLocation
+        let o = NSPoint(x: startOrigin.x + (m.x - startMouse.x), y: startOrigin.y + (m.y - startMouse.y))
+        window?.setFrameOrigin(o); onMoved?(o)
+    }
+    override func mouseUp(with e: NSEvent) { onEnded?() }
+
+    override func draw(_ r: NSRect) {
+        let rows = KibbleDot.stages[min(stage, KibbleDot.stages.count - 1)]
+        let h = rows.count, w = 7
+        let cell = floor(min(bounds.width / CGFloat(w), bounds.height / CGFloat(h)))
+        let ox = (bounds.width - cell * CGFloat(w)) / 2
+        let oy = (bounds.height - cell * CGFloat(h)) / 2
+        for (ri, row) in rows.enumerated() {
+            for (ci, ch) in row.enumerated() {
+                let color: NSColor? = ch == "#" ? .black : (ch == "W" ? .white : nil)
+                guard let c = color else { continue }
+                c.setFill()
+                NSRect(x: ox + CGFloat(ci) * cell, y: oy + CGFloat(h - 1 - ri) * cell,
+                       width: cell, height: cell).fill()
+            }
+        }
+    }
+}
+
+final class Kibble {
+    let win: NSWindow
+    let dot: KibbleDot
+    var x: CGFloat          // центр по X
+    var y: CGFloat          // origin окна по Y
+    var vx: CGFloat = 0     // скорость (инерция)
+    var vy: CGFloat = 0
+    var landed = false
+    var dragging = false    // тащат мышью
+    var canEscape = false   // можно ли вылететь за экран (бросок из верхней половины)
+    var eaten = 0           // сколько откусано
+    let maxBites: Int       // за сколько укусов исчезнет
+    init(win: NSWindow, dot: KibbleDot, x: CGFloat, y: CGFloat, maxBites: Int) {
+        self.win = win; self.dot = dot; self.x = x; self.y = y; self.maxBites = maxBites
+    }
+}
+
+// Клубок — пиксельный мячик; катается, отскакивает, кидается; кот за ним гоняется
+final class YarnView: NSView {
+    static let rows = [ "..###..", ".#ppp#.", "#pPppP#", "#ppPpp#", "#Ppppp#", ".#ppp#.", "..###.." ]
+    var onBegan: (() -> Void)?, onMoved: ((CGPoint) -> Void)?, onEnded: (() -> Void)?
+    private var startMouse = NSPoint.zero, startOrigin = NSPoint.zero
+    override func mouseDown(with e: NSEvent) {
+        startMouse = NSEvent.mouseLocation; startOrigin = window?.frame.origin ?? .zero; onBegan?()
+    }
+    override func mouseDragged(with e: NSEvent) {
+        let m = NSEvent.mouseLocation
+        let o = NSPoint(x: startOrigin.x + (m.x - startMouse.x), y: startOrigin.y + (m.y - startMouse.y))
+        window?.setFrameOrigin(o); onMoved?(o)
+    }
+    override func mouseUp(with e: NSEvent) { onEnded?() }
+    override func draw(_ r: NSRect) {
+        let rows = YarnView.rows, h = rows.count, w = 7
+        let cell = floor(min(bounds.width / CGFloat(w), bounds.height / CGFloat(h)))
+        let ox = (bounds.width - cell * CGFloat(w)) / 2, oy = (bounds.height - cell * CGFloat(h)) / 2
+        for (ri, row) in rows.enumerated() { for (ci, ch) in row.enumerated() {
+            let col: NSColor? = ch == "#" ? .black
+                : (ch == "p" ? NSColor(srgbRed: 1, green: 0.47, blue: 0.66, alpha: 1)
+                : (ch == "P" ? NSColor(srgbRed: 0.82, green: 0.31, blue: 0.51, alpha: 1) : nil))
+            guard let c = col else { continue }
+            c.setFill()
+            NSRect(x: ox + CGFloat(ci) * cell, y: oy + CGFloat(h - 1 - ri) * cell, width: cell, height: cell).fill()
+        }}
+    }
+}
+
+final class Yarn {
+    let win: NSWindow; let view: YarnView
+    var x: CGFloat, y: CGFloat
+    var vx: CGFloat = 0, vy: CGFloat = 0
+    var landed = false, dragging = false
+    init(win: NSWindow, view: YarnView, x: CGFloat, y: CGFloat) {
+        self.win = win; self.view = view; self.x = x; self.y = y
+    }
+}
