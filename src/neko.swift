@@ -409,15 +409,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // что делать, когда сам проснулся / закончил сидеть
-    func pileCenter() -> CGFloat? {
-        let xs = kibbles.map { $0.x }
-        return xs.isEmpty ? nil : xs.reduce(0, +) / CGFloat(xs.count)
+    // центр БЛИЖАЙШЕЙ кучки: внутри кучи усредняем (встаёт по центру),
+    // но между раздельными кучами не садится — идёт к ближайшей
+    func foodTargetX() -> CGFloat? {
+        let xs = kibbles.filter { $0.landed && !$0.dragging }.map { $0.x }.sorted()
+        guard !xs.isEmpty else { return nil }
+        var clusters: [[CGFloat]] = [[xs[0]]]
+        for v in xs.dropFirst() {
+            if v - clusters[clusters.count - 1].last! <= SIZE / 2 {   // тот же кластер
+                clusters[clusters.count - 1].append(v)
+            } else {
+                clusters.append([v])                                   // новая кучка
+            }
+        }
+        let centers = clusters.map { $0.reduce(0, +) / CGFloat($0.count) }
+        return centers.min(by: { abs($0 - x) < abs($1 - x) })
     }
 
     func decideNext() {
         toFood = false; goingAway = false; leaving = false   // свежее решение — без залипших намерений
-        if hunger > EAT_HUNGER, let c = pileCenter() {   // идёт к корму только если голоден
+        if hunger > EAT_HUNGER, let c = foodTargetX() {   // идёт к корму только если голоден
             toFood = true; targetX = c; enter(.walk); return
         }
 
@@ -517,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // корм всегда привлекает — прерывает беготню/ходьбу/сидение (но не сон/уход)
-        if hunger > EAT_HUNGER && !eating && !goingAway && !leaving, let c = pileCenter() {
+        if hunger > EAT_HUNGER && !eating && !goingAway && !leaving, let c = foodTargetX() {
             switch st {
             case .walk:
                 toFood = true; targetX = c          // уже идём — только правим цель, анимацию не сбрасываем
@@ -587,7 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             k.win.orderOut(nil)
                             kibbles.removeAll { $0 === k }
                             eatingRef = nil; eating = false
-                            if hunger > FULL, let c = pileCenter() {   // ещё не наелся и есть корм — к следующему
+                            if hunger > FULL, let c = foodTargetX() {   // ещё не наелся и есть корм — к следующему
                                 toFood = true; targetX = c; enter(.walk)
                             } else {
                                 decideNext()
