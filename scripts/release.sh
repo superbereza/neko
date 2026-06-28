@@ -12,15 +12,16 @@ if [ -z "$VER" ]; then echo "Укажи версию: scripts/release.sh 1.0.1";
 # 1) проставить версию в исходник
 sed -i '' -E "s/let VERSION = \"[0-9.]+\"/let VERSION = \"$VER\"/" src/neko.swift
 
-# 2) собрать и упаковать
+# 2) собрать и упаковать (zip — для авто-апдейтера, dmg — для людей)
 ./build.sh >/dev/null
 ditto -c -k --keepParent dist/Neko.app dist/Neko.zip
+scripts/dmg.sh >/dev/null
 
 # 3) коммит и тег
 git add -A
 git commit -q -m "Neko $VER" || true
 git push -q
 
-# 4) релиз на GitHub (ассет Neko.zip)
-gh release create "v$VER" dist/Neko.zip --title "Neko $VER" --notes "$NOTES"
+# 4) релиз на GitHub (Neko.zip для апдейтера + Neko.dmg для скачивания)
+gh release create "v$VER" dist/Neko.zip dist/Neko.dmg --title "Neko $VER" --notes "$NOTES"
 echo "Готово: релиз v$VER опубликован. У пользователей обновится автоматически."
