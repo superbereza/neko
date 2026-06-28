@@ -10,8 +10,8 @@ let img = NSImage(size: NSSize(width: S, height: S))
 img.lockFocus()
 NSGraphicsContext.current?.imageInterpolation = .none   // чёткие пиксели
 
-// область головы в oneko.png (кадр 3,3): уши + морда
-let src = NSRect(x: 99, y: 13, width: 24, height: 18)
+// область головы в oneko.png (кадр 3,3): уши + морда, центрирована по середине ячейки (x=112)
+let src = NSRect(x: 100, y: 13, width: 24, height: 18)
 // вписываем с полями, сохраняя пропорции
 let pad = S * 0.1
 let box = S - 2 * pad

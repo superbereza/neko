@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.1"
+let VERSION = "1.0.2"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -109,6 +109,16 @@ final class Kibble {
 
 enum St { case sleep, idle, walk, digging, away, falling, zoomies }
 
+enum Mood: String, CaseIterable {
+    case playful, lazy, curious, hungry, normal
+    var label: String {
+        switch self {
+        case .playful: return "Playful"; case .lazy: return "Lazy"
+        case .curious: return "Curious"; case .hungry: return "Hungry"; case .normal: return "Normal"
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var win: NSWindow!
     let iv = NekoView()
@@ -141,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var hotKeyRef: EventHotKeyRef?
     var pourTimer: Timer?
+    var mood: Mood = .normal     // настроение дня (меняет поведение)
 
     let sets: [String: [(Int, Int)]] = [
         "idle":    [(3, 3)],
@@ -177,6 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.contentView = iv
         x = NSScreen.main?.frame.midX ?? 400
         y = bottomY()
+        // настроение дня (детерминированно по дню года → меняется день ото дня)
+        let day = Calendar.current.ordinality(of: .day, in: .year, for: Date()) ?? 0
+        mood = Mood.allCases[day % Mood.allCases.count]
+        restoreState()   // восстановить потребности, позицию и корм
         win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
         win.orderFrontRegardless()
 
@@ -192,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(autoItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "About Neko", action: #selector(aboutMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Today's mood: \(mood.label)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Neko \(VERSION)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -199,6 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerFoodHotkey()
         enter(.sleep)
         Timer.scheduledTimer(withTimeInterval: TICK, repeats: true) { [weak self] _ in self?.tick() }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.saveState() }
         // проверка обновлений при запуске и раз в 6 часов
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.checkForUpdates() }
         Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
@@ -285,22 +302,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let crep = (hour >= 6 && hour < 9) || (hour >= 18 && hour < 22)  // сумерки — пик активности
 
         // веса действий по потребностям и времени суток
-        let weights: [(St, Double)] = [
-            (.sleep,   (1.4 - energy) + (night ? 1.4 : 0.3)),                       // устал/ночь → спать
-            (.walk,    0.5 + boredom * 0.9 + energy * 0.3),                         // скучно/бодр → бродить
-            (.zoomies, max(0, boredom * energy * (0.4 + hN)) * (crep ? 2.0 : 0.5)), // скука+энергия+голод+сумерки → носиться
-            (.idle,    0.5),                                                        // посидеть/умыться
-        ]
+        var wSleep = (1.4 - energy) + (night ? 1.4 : 0.3)        // устал/ночь → спать
+        var wWalk = 0.5 + boredom * 0.9 + energy * 0.3          // скучно/бодр → бродить
+        var wZoom = max(0, boredom * energy * (0.4 + hN)) * (crep ? 2.0 : 0.5) // → носиться
+        var wIdle = 0.5                                         // посидеть/умыться
+
+        // настроение дня меняет акценты
+        switch mood {
+        case .playful: wZoom *= 2.2; wWalk *= 1.4; wSleep *= 0.7
+        case .lazy:    wSleep *= 1.7; wWalk *= 0.6; wZoom *= 0.4
+        case .curious: wWalk *= 1.8; wIdle *= 0.7
+        case .hungry:  wZoom *= 1.5; wWalk *= 1.2
+        case .normal:  break
+        }
+
+        let weights: [(St, Double)] = [(.sleep, wSleep), (.walk, wWalk), (.zoomies, wZoom), (.idle, wIdle)]
         let total = weights.reduce(0) { $0 + $1.1 }
         var r = Double.random(in: 0..<total)
         var pick = St.idle
         for (s, w) in weights { if r < w { pick = s; break }; r -= w }
 
+        let awayChance = (mood == .curious) ? 0.16 : 0.07       // любопытный чаще уходит «за стену»
         switch pick {
         case .zoomies:
             enter(.zoomies)
         case .walk:
-            if Double.random(in: 0..<1) < 0.07 {            // изредка своенравно уходит за стену
+            if Double.random(in: 0..<1) < awayChance {          // своенравно уходит за стену
                 goingAway = true; awayLeft = Bool.random()
                 targetX = awayLeft ? leftEdge() : rightEdge()
                 enter(.walk)
@@ -340,7 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         y = bottomY()
         stTicks += 1
-        hunger += 1
+        hunger += (mood == .hungry ? 2 : 1)   // голодное настроение — быстрее хочет есть
 
         // потребности: энергия и скука дрейфуют по состоянию
         switch st {
@@ -554,6 +581,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Сохранение состояния (переживает перезапуск/обновление)
+    func saveState() {
+        let d = UserDefaults.standard
+        d.set(energy, forKey: "neko.energy")
+        d.set(boredom, forKey: "neko.boredom")
+        d.set(hunger, forKey: "neko.hunger")
+        d.set(Double(x), forKey: "neko.x")
+        let arr = kibbles.filter { $0.landed }.map {
+            ["x": Double($0.x), "y": Double($0.y), "eaten": $0.eaten, "max": $0.maxBites]
+        }
+        d.set(arr, forKey: "neko.kibbles")
+    }
+    func restoreState() {
+        let d = UserDefaults.standard
+        if d.object(forKey: "neko.energy") != nil {
+            energy = d.double(forKey: "neko.energy")
+            boredom = d.double(forKey: "neko.boredom")
+            hunger = d.integer(forKey: "neko.hunger")
+            if let xx = d.object(forKey: "neko.x") as? Double { x = CGFloat(xx) }
+        }
+        if let arr = d.array(forKey: "neko.kibbles") as? [[String: Any]] {
+            for k in arr {
+                let kx = CGFloat(k["x"] as? Double ?? 0)
+                let ky = CGFloat(k["y"] as? Double ?? 0)
+                makeKibble(x: kx, y: ky, maxBites: k["max"] as? Int ?? 4,
+                           eaten: k["eaten"] as? Int ?? 0, landed: true)
+            }
+        }
+    }
+    func applicationWillTerminate(_ n: Notification) { saveState() }
+
     func startWalkabout() {        // уйти гулять за стену (вызывается сам / для демо)
         goingAway = true; toFood = false; awayLeft = Bool.random()
         targetX = awayLeft ? leftEdge() : rightEdge()
@@ -568,8 +626,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if kibbles.count >= 80 { return }   // лимит, чтобы не наплодить окон
         let s = NSScreen.main ?? NSScreen.screens[0]
         let m = NSEvent.mouseLocation
-        let sz: CGFloat = 14
         let cx = min(max(m.x, s.frame.minX + 8), s.frame.maxX - 8)
+        makeKibble(x: cx, y: m.y - 7, maxBites: Int.random(in: 3...4))
+    }
+
+    @discardableResult
+    func makeKibble(x: CGFloat, y: CGFloat, maxBites: Int, eaten: Int = 0, landed: Bool = false) -> Kibble {
+        let sz: CGFloat = 14
         let w = NekoWindow(contentRect: NSRect(x: 0, y: 0, width: sz, height: sz),
                            styleMask: .borderless, backing: .buffered, defer: false)
         w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
@@ -578,10 +641,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         let dot = KibbleDot(frame: NSRect(x: 0, y: 0, width: sz, height: sz))
         w.contentView = dot
-        let startY = m.y - sz / 2
-        w.setFrameOrigin(NSPoint(x: cx - sz / 2, y: startY))
+        w.setFrameOrigin(NSPoint(x: x - sz / 2, y: y))
         w.orderFrontRegardless()
-        let kib = Kibble(win: w, dot: dot, x: cx, y: startY, maxBites: Int.random(in: 3...4))
+        let kib = Kibble(win: w, dot: dot, x: x, y: y, maxBites: maxBites)
+        kib.eaten = eaten; kib.landed = landed
+        dot.stage = min(KibbleDot.stages.count - 1, Int(Double(eaten) / Double(maxBites) * Double(KibbleDot.stages.count)))
         dot.onBegan = { [weak kib] in kib?.dragging = true; kib?.landed = false; kib?.vx = 0; kib?.vy = 0 }
         dot.onMoved = { [weak kib] o in
             guard let kib = kib else { return }
@@ -590,14 +654,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             kib.vy = max(-45, min(45, o.y - kib.y))
             kib.x = nx; kib.y = o.y
         }
-        dot.onEnded = { [weak self, weak kib] in
+        dot.onEnded = { [weak kib] in
             guard let kib = kib else { return }
             kib.dragging = false; kib.landed = false
             let mid = (NSScreen.main ?? NSScreen.screens[0]).frame.midY
             kib.canEscape = kib.y > mid     // из верхней половины — улетит; из нижней — отскочит
-            _ = self
         }
         kibbles.append(kib)
+        return kib
     }
 
     // гравитация: падают до пола
