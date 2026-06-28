@@ -210,7 +210,7 @@ extension AppDelegate {
         k.vy = 5; k.landed = false
         playDir = -playDir                          // следующий раз — в другую сторону
         boredom = max(0, boredom - 0.05)            // игра развлекает
-        playSat = min(1, playSat + 0.05)            // и понемногу надоедает
+        playSat = min(1, playSat + 0.03)            // надоедает медленнее → дольше играет
         if playSat >= 0.85 { playTired = true }     // наигрался — пойдёт отдыхать
     }
 
