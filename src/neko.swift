@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.10"
+let VERSION = "1.0.11"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -192,6 +192,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if CommandLine.arguments.contains("--demo-walk") {   // разовый показ ухода
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.startWalkabout() }
+        }
+
+        // App Translocation: запущен из временной копии → авто-обновление не сработает, подскажем
+        if Bundle.main.bundlePath.contains("/AppTranslocation/") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.alert("Tip: drag Neko into your Applications folder (from the disk image).\n\nRight now macOS runs it from a temporary copy, so it can't auto-update.")
+            }
         }
     }
 
@@ -499,6 +506,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func installUpdate(_ zipURL: String) {
         let appPath = Bundle.main.bundlePath
+        if appPath.contains("/AppTranslocation/") {   // macOS запустил из временной копии — подмена не сработает
+            alert("Can't update: macOS is running Neko from a temporary copy.\n\nDrag Neko into your Applications folder (from the disk image), then it will update normally.")
+            return
+        }
         let pid = ProcessInfo.processInfo.processIdentifier
         DispatchQueue.global().async {
             // выполняем шаг и возвращаем статус (всё логируется в /tmp/neko_update.log)
