@@ -5,13 +5,14 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 APP="dist/Neko.app"
+VER=$(grep -m1 'let VERSION' src/neko.swift | sed -E 's/.*"([0-9.]+)".*/\1/')
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O src/neko.swift -o "$APP/Contents/MacOS/Neko"
 cp assets/oneko.png "$APP/Contents/Resources/oneko.png"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -20,7 +21,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>      <string>local.neko</string>
     <key>CFBundleExecutable</key>      <string>Neko</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleVersion</key>         <string>1.0</string>
+    <key>CFBundleVersion</key>         <string>$VER</string>
+    <key>CFBundleShortVersionString</key><string>$VER</string>
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>LSUIElement</key>             <true/>
 </dict>

@@ -4,6 +4,8 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
+let VERSION = "1.0.0"
+let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
 let SIZE = CGFloat(CELL) * SCALE      // 64
@@ -184,12 +186,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Насыпать корм (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Погулять (уйти за стену)", action: #selector(walkMenu), keyEquivalent: ""))
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Проверить обновления", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
+        let autoItem = NSMenuItem(title: "Автообновление", action: #selector(toggleAutoUpdate), keyEquivalent: "")
+        autoItem.state = autoUpdate ? .on : .off
+        menu.addItem(autoItem)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Neko \(VERSION)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Выход", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
 
         registerFoodHotkey()
         enter(.sleep)
         Timer.scheduledTimer(withTimeInterval: TICK, repeats: true) { [weak self] _ in self?.tick() }
+        // проверка обновлений при запуске и раз в 6 часов
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.checkForUpdates() }
+        Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
 
         if CommandLine.arguments.contains("--demo-walk") {   // разовый показ ухода
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.startWalkabout() }
@@ -359,10 +370,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 zoomReps -= 1
                 if zoomReps <= 0 { enter(.idle); img = frame("idle", 0) }
                 else { targetX = (tx <= leftEdge() + 1) ? rightEdge() : leftEdge()
-                       img = frame(dx > 0 ? "E" : "W", Int(abs(x) / 7)) }
+                       img = frame(dx > 0 ? "E" : "W", anim) }
             } else {
                 x += dx > 0 ? ZOOM : -ZOOM
-                img = frame(dx > 0 ? "E" : "W", Int(abs(x) / 7))   // кадр лап от пути
+                img = frame(dx > 0 ? "E" : "W", anim)
             }
         case .walk:
             let sp: CGFloat = toFood ? FOOD_SPEED : SPEED
@@ -375,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
             } else {
                 x += dx > 0 ? sp : -sp
-                img = frame(dx > 0 ? "E" : "W", Int(abs(x) / 9))   // кадр лап от пройденного пути
+                img = frame(dx > 0 ? "E" : "W", stTicks / 3)
             }
         case .digging:
             img = frame(awayLeft ? "digL" : "digR", stTicks / 5)   // копает дырку
@@ -435,6 +446,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func walkMenu() { startWalkabout() }
+
+    // MARK: - Обновления (GitHub Releases, публичный репо)
+    var autoUpdate: Bool {
+        get { (UserDefaults.standard.object(forKey: "neko.autoUpdate") as? Bool) ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "neko.autoUpdate") }
+    }
+
+    func versionTuple(_ s: String) -> [Int] {
+        s.replacingOccurrences(of: "v", with: "").split(separator: ".").map { Int($0) ?? 0 }
+    }
+    func isNewer(_ tag: String) -> Bool {
+        let a = versionTuple(tag), b = versionTuple(VERSION)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0, y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    @objc func checkUpdatesMenu() { checkForUpdates(manual: true) }
+
+    @objc func toggleAutoUpdate(_ sender: NSMenuItem) {
+        autoUpdate.toggle()
+        sender.state = autoUpdate ? .on : .off
+    }
+
+    func checkForUpdates(manual: Bool = false) {
+        let url = URL(string: "https://api.github.com/repos/\(REPO)/releases/latest")!
+        var req = URLRequest(url: url)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self else { return }
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else {
+                if manual { DispatchQueue.main.async { self.alert("Не удалось проверить обновления") } }
+                return
+            }
+            let assets = json["assets"] as? [[String: Any]] ?? []
+            let zip = assets.compactMap { $0["browser_download_url"] as? String }.first { $0.hasSuffix(".zip") }
+            DispatchQueue.main.async {
+                if self.isNewer(tag), let zip = zip {
+                    if self.autoUpdate {
+                        self.installUpdate(zip)
+                    } else {
+                        let a = NSAlert()
+                        a.messageText = "Вышла новая версия \(tag)"
+                        a.informativeText = "Обновить Neko сейчас?"
+                        a.addButton(withTitle: "Обновить"); a.addButton(withTitle: "Позже")
+                        if a.runModal() == .alertFirstButtonReturn { self.installUpdate(zip) }
+                    }
+                } else if manual {
+                    self.alert("У вас последняя версия (\(VERSION))")
+                }
+            }
+        }.resume()
+    }
+
+    func alert(_ text: String) {
+        let a = NSAlert(); a.messageText = "Neko"; a.informativeText = text; a.runModal()
+    }
+
+    func installUpdate(_ zipURL: String) {
+        let appPath = Bundle.main.bundlePath
+        let pid = ProcessInfo.processInfo.processIdentifier
+        DispatchQueue.global().async {
+            // качаем + распаковываем, пока живы
+            let dl = Process(); dl.launchPath = "/usr/bin/curl"
+            dl.arguments = ["-fsSL", "-o", "/tmp/neko_up.zip", zipURL]
+            try? dl.run(); dl.waitUntilExit()
+            guard dl.terminationStatus == 0 else { return }
+            // распаковка и подмена — после выхода приложения, затем перезапуск
+            let script = """
+            rm -rf /tmp/neko_up && mkdir -p /tmp/neko_up
+            /usr/bin/ditto -x -k /tmp/neko_up.zip /tmp/neko_up
+            NEW=$(/usr/bin/find /tmp/neko_up -maxdepth 3 -name 'Neko.app' | head -1)
+            [ -z "$NEW" ] && exit 1
+            while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+            rm -rf '\(appPath)'
+            /usr/bin/ditto "$NEW" '\(appPath)'
+            /usr/bin/xattr -dr com.apple.quarantine '\(appPath)' 2>/dev/null
+            open '\(appPath)'
+            """
+            let p = Process(); p.launchPath = "/bin/sh"; p.arguments = ["-c", script]
+            try? p.run()
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
 
     func startWalkabout() {        // уйти гулять за стену (вызывается сам / для демо)
         goingAway = true; toFood = false; awayLeft = Bool.random()
