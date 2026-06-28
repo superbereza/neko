@@ -4,13 +4,17 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.5"
+let VERSION = "1.0.6"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
 let SIZE = CGFloat(CELL) * SCALE      // 64
 let SPEED: CGFloat = 4                // мягкая походка
 let TICK = 0.1
+
+func rgb(_ r: Int, _ g: Int, _ b: Int) -> NSColor {
+    NSColor(srgbRed: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var win: NSWindow!
@@ -38,8 +42,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var zoomReps = 0           // сколько ещё рывков «носиться»
     var huntHopH: CGFloat = 60     // высота вертикального прыжка-охоты (к курсору над котом)
     var huntCool = 0               // кулдаун между прыжками
+    var hoverTicks = 0             // сколько мышь висит над котом (нужно «зависание», не пролёт)
+    var clinging = false           // висит на курсоре
     var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
     var toFood = false         // спешит к корму
+    var yarn: Yarn?            // клубок (одна штука), кот за ним гоняется
+    var toPlay = false         // спешит к клубку поиграть
+    var playSat = 0.0          // 0..1 — насколько клубок надоел (растёт от игры, спадает со временем)
+    var playTired = false      // наигрался — отдыхает, пока интерес не восстановится (гистерезис)
+    var playDir: CGFloat = 1   // в какую сторону толкнуть в этот раз (чередуется)
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни
@@ -102,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let day = Calendar.current.ordinality(of: .day, in: .year, for: Date()) ?? 0
         mood = Mood.allCases[day % Mood.allCases.count]
         restoreState()   // восстановить потребности, позицию и корм
-        engine = makeEngine(UserDefaults.standard.string(forKey: "neko.engine") ?? "reflex")
+        engine = makeEngine(UserDefaults.standard.string(forKey: "neko.engine") ?? "utility")
         win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
         win.orderFrontRegardless()
 
@@ -111,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Pour kibble (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Clear food", action: #selector(clearFoodMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Toss a yarn ball", action: #selector(tossYarnMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Remove yarn ball", action: #selector(removeYarnMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Go for a walk", action: #selector(walkMenu), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Check for updates", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
@@ -236,7 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: перетаскивание
-    func dragBegan() { dragging = true; eating = false; eatingRef = nil; iv.image = frame("held", 0) }
+    func dragBegan() { dragging = true; clinging = false; eating = false; eatingRef = nil; iv.image = frame("held", 0) }
     func dragEnded() {
         dragging = false
         x = win.frame.origin.x + SIZE / 2
@@ -246,15 +259,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         st = .falling                           // мягко приземлится на лапы (без отскока)
     }
 
+    // Висит на курсоре: следует за мышью; отваливается, если поднять выше нижней трети экрана.
+    func clingStep() {
+        let s = NSScreen.main ?? NSScreen.screens[0]
+        let m = NSEvent.mouseLocation
+        if m.y > s.frame.minY + s.frame.height / 3 {   // подняли высоко — срывается и падает
+            clinging = false
+            x = m.x
+            fallY = m.y - SIZE * 0.35
+            fallVx = 0; fallVy = 0
+            st = .falling
+            return
+        }
+        x = m.x
+        win.setFrameOrigin(NSPoint(x: m.x - SIZE / 2, y: m.y - SIZE * 0.85))  // болтается под курсором
+        iv.image = frame("held", anim / 3)
+        anim += 1
+    }
+
     // MARK: состояние
 
     func tick() {
         updateKibbles()                     // корм падает всегда
+        updateYarn()                        // клубок катается/отскакивает
         if dragging {                       // пока несут — болтает ногами
             iv.image = frame("held", anim / 3)
             anim += 1
             return
         }
+        if clinging { clingStep(); return } // висит на курсоре (поймал в прыжке)
 
         if st == .falling {                 // летит по параболе и мягко садится (без отскока)
             let ground = bottomY()
@@ -481,6 +514,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for k in kibbles { k.win.orderOut(nil) }
         kibbles.removeAll()
         eating = false; eatingRef = nil
+    }
+
+    // MARK: клубок
+    let YSIZE: CGFloat = 28
+    @objc func tossYarnMenu() {
+        let s = NSScreen.main ?? NSScreen.screens[0]
+        let m = NSEvent.mouseLocation
+        if yarn == nil { makeYarn(x: min(max(m.x, s.frame.minX + 10), s.frame.maxX - 10), y: m.y) }
+        if let k = yarn { k.vx = CGFloat.random(in: -16...16); k.vy = 6; k.landed = false }  // придать движение
+    }
+    @objc func removeYarnMenu() { yarn?.win.orderOut(nil); yarn = nil; toPlay = false }
+
+    @discardableResult
+    func makeYarn(x: CGFloat, y: CGFloat) -> Yarn {
+        let w = NekoWindow(contentRect: NSRect(x: 0, y: 0, width: YSIZE, height: YSIZE),
+                           styleMask: .borderless, backing: .buffered, defer: false)
+        w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
+        w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
+        w.ignoresMouseEvents = false
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        let v = YarnView(frame: NSRect(x: 0, y: 0, width: YSIZE, height: YSIZE))
+        let palette: [(NSColor, NSColor)] = [   // (мяч, нитки) — разный цвет каждый раз
+            (rgb(255,120,170), rgb(210,80,130)),   // розовый
+            (rgb(120,170,255), rgb(70,110,210)),   // голубой
+            (rgb(130,220,170), rgb(70,160,110)),   // мятный
+            (rgb(255,205,100), rgb(210,150,50)),   // жёлтый
+            (rgb(180,150,255), rgb(120,90,210)),   // фиолетовый
+            (rgb(255,160,110), rgb(210,110,60)),   // оранжевый
+        ]
+        let pick = palette.randomElement()!
+        v.ball = pick.0; v.thread = pick.1
+        w.contentView = v
+        w.setFrameOrigin(NSPoint(x: x - YSIZE / 2, y: y - YSIZE / 2))
+        w.orderFrontRegardless()
+        let k = Yarn(win: w, view: v, x: x, y: y)
+        v.onBegan = { [weak k] in k?.dragging = true; k?.vx = 0; k?.vy = 0 }
+        v.onMoved = { [weak k] o in
+            guard let k = k else { return }
+            let nx = o.x + self.YSIZE / 2, ny = o.y + self.YSIZE / 2
+            k.vx = max(-40, min(40, nx - k.x)); k.vy = max(-40, min(40, ny - k.y))   // инерция руки
+            k.x = nx; k.y = ny
+        }
+        v.onEnded = { [weak k] in k?.dragging = false; k?.landed = false }   // бросок
+        yarn = k
+        return k
+    }
+
+    func updateYarn() {
+        guard let k = yarn, !k.dragging else { return }
+        let s = NSScreen.main ?? NSScreen.screens[0]
+        let g = s.frame.minY + YSIZE / 2
+        k.vy -= 2.0                          // гравитация
+        k.x += k.vx; k.y += k.vy
+        if k.y <= g {                        // отскок от пола, потом покой
+            k.y = g
+            k.vy = abs(k.vy) > 3 ? abs(k.vy) * 0.4 : 0
+        }
+        k.vx *= 0.97                         // качение с трением
+        if abs(k.vx) < 0.2 { k.vx = 0 }
+        if k.x < s.frame.minX + YSIZE / 2 { k.x = s.frame.minX + YSIZE / 2; k.vx = -k.vx * 0.6 }
+        if k.x > s.frame.maxX - YSIZE / 2 { k.x = s.frame.maxX - YSIZE / 2; k.vx = -k.vx * 0.6 }
+        k.landed = (k.y <= g + 0.5 && k.vx == 0 && k.vy == 0)
+        if k.vx != 0 {                              // катится — вращаем спрайт
+            k.angle -= Double(k.vx) / Double(YSIZE / 2) * 180 / .pi
+            k.view.frameCenterRotation = CGFloat(k.angle)
+        }
+        k.win.setFrameOrigin(NSPoint(x: k.x - YSIZE / 2, y: k.y - YSIZE / 2))
     }
 
     // высыпать один катышек из позиции курсора (падает на пол)

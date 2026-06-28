@@ -6,8 +6,8 @@ extension AppDelegate {
         st = s; stTicks = 0; hopOffset = 0
         // гасим несовместимые намерения, чтобы не возникало невозможных комбинаций
         switch s {
-        case .sleep, .zoomies, .hunt:                // никаких миссий
-            toFood = false; goingAway = false; leaving = false; eating = false; eatingRef = nil
+        case .sleep, .zoomies, .hunt, .play:         // никаких миссий
+            toFood = false; toPlay = false; goingAway = false; leaving = false; eating = false; eatingRef = nil
         case .idle:                                  // idle не «уходит»; еда выставляется отдельно после прихода
             goingAway = false; leaving = false
         case .walk:                                  // на ходу не грызём (toFood/goingAway ставит вызывающий)
@@ -23,6 +23,7 @@ extension AppDelegate {
         case .away:    stDur = Int.random(in: 1800...6000)  // 3–10 мин гуляет
         case .falling: stDur = 0
         case .hunt:    stDur = 30
+        case .play:    stDur = 8
         case .zoomies: stDur = 0; zoomReps = Int.random(in: 5...10)
                        targetX = Bool.random() ? leftEdge() : rightEdge()
         }
@@ -46,7 +47,7 @@ extension AppDelegate {
     }
 
     func decideNext() {
-        toFood = false; goingAway = false; leaving = false   // свежее решение — без залипших намерений
+        toFood = false; toPlay = false; goingAway = false; leaving = false   // свежее решение — без залипших намерений
         if hunger > EAT_HUNGER, let c = foodTargetX() {   // идёт к корму только если голоден
             toFood = true; targetX = c; enter(.walk); return
         }
@@ -104,7 +105,7 @@ extension AppDelegate {
     }
 
     func utilityDecide() {
-        toFood = false; goingAway = false; leaving = false
+        toFood = false; toPlay = false; goingAway = false; leaving = false
         if hunger > EAT_HUNGER, let c = foodTargetX() { toFood = true; targetX = c; enter(.walk); return }
 
         let hour = Calendar.current.component(.hour, from: Date())
@@ -112,25 +113,24 @@ extension AppDelegate {
         let crep = (hour >= 6 && hour < 9) || (hour >= 18 && hour < 22)
 
         // полезности из нужд (response-кривые: «игнорить до порога, потом расти»)
-        var uSleep = ramp(1 - energy, 0.25, 0.9) * (night ? 1.6 : 0.8) + (night ? 0.4 : 0.0)
-        var uWalk  = 0.3 + ramp(boredom, 0.1, 0.8) * 0.9 + energy * 0.2
-        var uZoom  = ramp(boredom, 0.45, 1.0) * energy * (crep ? 1.7 : 0.5)
-        var uIdle  = 0.5
+        var uSleep = ramp(1 - energy, 0.35, 0.95) * (night ? 1.4 : 0.7)   // спит, когда реально устал
+        var uWalk  = 0.7 + ramp(boredom, 0.05, 0.7) * 1.0 + energy * 0.2  // спокойная прогулка — частая
+        var uZoom  = ramp(boredom, 0.6, 1.0) * energy * (crep ? 1.0 : 0.3) // беготня — реже, когда очень бодр и скучно
+        var uIdle  = 0.6                                                  // посидеть/умыться
 
         switch mood {
-        case .playful: uZoom *= 2.2; uWalk *= 1.4; uSleep *= 0.7
-        case .lazy:    uSleep *= 1.7; uWalk *= 0.6; uZoom *= 0.4
-        case .curious: uWalk *= 1.8; uIdle *= 0.7
-        case .hungry:  uZoom *= 1.4; uWalk *= 1.2
+        case .playful: uZoom *= 1.8; uWalk *= 1.3; uSleep *= 0.8
+        case .lazy:    uSleep *= 1.6; uWalk *= 0.7; uZoom *= 0.4
+        case .curious: uWalk *= 1.6; uIdle *= 0.7
+        case .hungry:  uZoom *= 1.3; uWalk *= 1.2
         case .normal:  break
         }
 
-        // инерция: лёгкий бонус только что покинутому состоянию — меньше дёрганья
+        // лёгкая инерция активным состояниям (но НЕ сну — иначе пересыпает)
         switch st {
-        case .sleep:   uSleep *= 1.3
-        case .walk:    uWalk  *= 1.2
-        case .zoomies: uZoom  *= 1.2
-        case .idle:    uIdle  *= 1.2
+        case .walk:    uWalk *= 1.15
+        case .zoomies: uZoom *= 1.1
+        case .idle:    uIdle *= 1.1
         default: break
         }
 
@@ -162,26 +162,60 @@ extension AppDelegate {
     func utilityStep() {
         stepPreamble()
         if huntCool > 0 { huntCool -= 1 }
-        perceive()                                   // охота на курсор и т.п. (только Utility)
+        perceive()                                   // охота на курсор (только Utility)
+        playAttract()                                // гоняется за клубком (только Utility)
         runState(decide: { self.utilityDecide() })
     }
 
     // Восприятие окружения: мышь прямо НАД котом в зоне досягаемости → вертикальный подскок.
     func perceive() {
         guard huntCool == 0, !eating, !toFood, !goingAway, !leaving,
-              st == .idle || st == .walk || st == .zoomies else { return }
+              st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
         let m = NSEvent.mouseLocation
         let above = m.y - y                         // насколько мышь выше кота
         if abs(m.x - x) < 70 && above > 30 && above < 260 {   // над котом и в досягаемости
-            huntHopH = min(above, 150)              // подпрыгнуть к ней (с потолком)
-            enter(.hunt)
+            hoverTicks += 1
+            if hoverTicks >= 6 {                    // мышь именно ЗАВИСЛА (~0.6с), а не пролетела
+                hoverTicks = 0
+                huntHopH = min(above, 150)          // подпрыгнуть к ней (с потолком)
+                enter(.hunt)
+            }
+        } else {
+            hoverTicks = 0
         }
+    }
+
+    // Игра с клубком: если клубок есть и кот не очень устал — всегда бежит к нему
+    // (пока клубок не надоест). Еда в приоритете.
+    func playAttract() {
+        guard let k = yarn, !k.dragging, !eating, !toFood, !goingAway, !leaving,
+              energy > 0.22, !playTired else {           // устал или наигрался — не бежит
+            if st != .walk { toPlay = false }; return
+        }
+        switch st {
+        case .walk:                   if toPlay { targetX = k.x }   // уже бежим — правим цель
+        case .idle, .zoomies, .sleep: toPlay = true; targetX = k.x; enter(.walk)   // даже разбудит
+        default: break
+        }
+    }
+
+    // Мягкий толчок лапой, по очереди в разные стороны — клубок катается рядом, не улетает.
+    func batYarn() {
+        guard let k = yarn else { return }
+        k.vx = playDir * CGFloat.random(in: 4...8)
+        k.vy = 5; k.landed = false
+        playDir = -playDir                          // следующий раз — в другую сторону
+        boredom = max(0, boredom - 0.05)            // игра развлекает
+        playSat = min(1, playSat + 0.05)            // и понемногу надоедает
+        if playSat >= 0.85 { playTired = true }     // наигрался — пойдёт отдыхать
     }
 
     func stepPreamble() {
         y = bottomY()
         stTicks += 1
         hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
+        playSat = max(0, playSat - 0.0012)   // интерес к клубку понемногу восстанавливается
+        if playSat <= 0.4 { playTired = false }   // отдохнул — снова можно играть (гистерезис)
 
         // потребности: энергия и скука дрейфуют по состоянию
         switch st {
@@ -196,9 +230,9 @@ extension AppDelegate {
         if hunger > EAT_HUNGER && !eating && !goingAway && !leaving, let c = foodTargetX() {
             switch st {
             case .walk:
-                toFood = true; targetX = c          // уже идём — только правим цель, анимацию не сбрасываем
+                toFood = true; toPlay = false; targetX = c   // еда важнее игры
             case .zoomies, .idle:
-                toFood = true; targetX = c; enter(.walk)
+                toFood = true; toPlay = false; targetX = c; enter(.walk)
             default: break
             }
         }
@@ -228,6 +262,7 @@ extension AppDelegate {
                 x = tx
                 if leaving { leaving = false; win.orderOut(nil); enter(.away); img = frame("idle", 0) }
                 else if goingAway { enter(.digging); img = frame(awayLeft ? "digL" : "digR", 0) }
+                else if toPlay { toPlay = false; batYarn(); enter(.play); img = frame("held", 0) }
                 else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
             } else {
                 x += dx > 0 ? sp : -sp
@@ -292,11 +327,18 @@ extension AppDelegate {
             } else if stTicks < 17 {                        // вертикальный подскок к курсору (без сдвига вбок)
                 hopOffset = CGFloat(sin(Double(stTicks - 7) / 10.0 * .pi)) * huntHopH
                 img = frame("fall", anim / 2)               // лапы врастопырку — в прыжке
+                let m = NSEvent.mouseLocation
+                if abs(m.x - x) < 45 && abs(m.y - (y + hopOffset)) < 55 {   // достал курсор — цепляется!
+                    clinging = true; hopOffset = 0
+                }
             } else {                                        // приземлился
                 hopOffset = 0; huntCool = 12
                 boredom = max(0, boredom - 0.15)            // охота развлекает — снижает скуку
                 enter(.idle); img = frame("idle", 0)
             }
+        case .play:
+            img = frame("held", anim / 3)                   // лапками по клубку — как при подвешивании
+            if stTicks > stDur { enter(.idle) }
         case .falling:
             img = frame("held", 0)                          // (обрабатывается выше)
         }

@@ -1,6 +1,6 @@
 import Cocoa
 
-enum St { case sleep, idle, walk, digging, away, falling, zoomies, hunt
+enum St { case sleep, idle, walk, digging, away, falling, zoomies, hunt, play
     var label: String {
         switch self {
         case .sleep:   return "sleeping"
@@ -11,6 +11,7 @@ enum St { case sleep, idle, walk, digging, away, falling, zoomies, hunt
         case .falling: return "falling"
         case .zoomies: return "zoomies"
         case .hunt:    return "hunting"
+        case .play:    return "playing"
         }
     }
 }

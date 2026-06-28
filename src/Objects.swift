@@ -97,9 +97,12 @@ final class Kibble {
     }
 }
 
-// Клубок — пиксельный мячик; катается, отскакивает, кидается; кот за ним гоняется
+// Клубок — пиксельный мячик в полосочку (цвет задаётся при создании); катается, кидается.
+// Рисуется процедурным кругом с пикселем = SCALE (как у кота), а не растянутой иконкой.
 final class YarnView: NSView {
-    static let rows = [ "..###..", ".#ppp#.", "#pPppP#", "#ppPpp#", "#Ppppp#", ".#ppp#.", "..###.." ]
+    static let grid = 14                                                  // клеток в диаметре
+    var ball = NSColor(srgbRed: 1, green: 0.47, blue: 0.66, alpha: 1)     // основной цвет
+    var thread = NSColor(srgbRed: 0.82, green: 0.31, blue: 0.51, alpha: 1) // нитки-полоски
     var onBegan: (() -> Void)?, onMoved: ((CGPoint) -> Void)?, onEnded: (() -> Void)?
     private var startMouse = NSPoint.zero, startOrigin = NSPoint.zero
     override func mouseDown(with e: NSEvent) {
@@ -112,16 +115,20 @@ final class YarnView: NSView {
     }
     override func mouseUp(with e: NSEvent) { onEnded?() }
     override func draw(_ r: NSRect) {
-        let rows = YarnView.rows, h = rows.count, w = 7
-        let cell = floor(min(bounds.width / CGFloat(w), bounds.height / CGFloat(h)))
-        let ox = (bounds.width - cell * CGFloat(w)) / 2, oy = (bounds.height - cell * CGFloat(h)) / 2
-        for (ri, row) in rows.enumerated() { for (ci, ch) in row.enumerated() {
-            let col: NSColor? = ch == "#" ? .black
-                : (ch == "p" ? NSColor(srgbRed: 1, green: 0.47, blue: 0.66, alpha: 1)
-                : (ch == "P" ? NSColor(srgbRed: 0.82, green: 0.31, blue: 0.51, alpha: 1) : nil))
-            guard let c = col else { continue }
-            c.setFill()
-            NSRect(x: ox + CGFloat(ci) * cell, y: oy + CGFloat(h - 1 - ri) * cell, width: cell, height: cell).fill()
+        let n = YarnView.grid
+        let cell = bounds.width / CGFloat(n)        // = SCALE, пиксель как у кота
+        let c = (Double(n) - 1) / 2.0
+        let rad = Double(n) / 2.0 - 0.5
+        func inside(_ ci: Int, _ ri: Int) -> Bool {
+            let dx = Double(ci) - c, dy = Double(ri) - c
+            return (dx * dx + dy * dy).squareRoot() <= rad
+        }
+        for ri in 0..<n { for ci in 0..<n where inside(ci, ri) {
+            // контур = ровно граничная клетка (1 клетка = 2px, как у кота)
+            let edge = !inside(ci - 1, ri) || !inside(ci + 1, ri) || !inside(ci, ri - 1) || !inside(ci, ri + 1)
+            let col: NSColor = edge ? .black : ((ri + ci) % 3 == 0 ? thread : ball)  // диагональные полоски
+            col.setFill()
+            NSRect(x: CGFloat(ci) * cell, y: CGFloat(ri) * cell, width: cell, height: cell).fill()
         }}
     }
 }
@@ -131,6 +138,7 @@ final class Yarn {
     var x: CGFloat, y: CGFloat
     var vx: CGFloat = 0, vy: CGFloat = 0
     var landed = false, dragging = false
+    var angle: Double = 0      // угол качения (вращение спрайта)
     init(win: NSWindow, view: YarnView, x: CGFloat, y: CGFloat) {
         self.win = win; self.view = view; self.x = x; self.y = y
     }
