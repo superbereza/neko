@@ -175,7 +175,7 @@ extension AppDelegate {
               st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
         let m = NSEvent.mouseLocation
         let above = m.y - y                         // насколько мышь выше кота
-        if abs(m.x - x) < 75 && above > 45 && above < 250 {   // мышь над котом (не слишком вбок) и в досягаемости
+        if abs(m.x - x) < 75 && above > SIZE * 1.5 && above < 260 {   // мышь заметно ВЫШЕ кота (≥1.5 роста) — чтоб был настоящий прыжок
             hoverTicks += 1
             if hoverTicks >= 6 {                    // мышь зависла (~0.6с), а не пролетела
                 hoverTicks = 0
@@ -192,31 +192,55 @@ extension AppDelegate {
     // Игра с клубком: если клубок есть и кот не очень устал — всегда бежит к нему
     // (пока клубок не надоест). Еда в приоритете.
     func playAttract() {
-        guard let k = yarn, !k.dragging, !eating, !toFood, !goingAway, !leaving,
-              energy > 0.22, !playTired else {           // устал или наигрался — не бежит
-            if st != .walk { toPlay = false }; return
+        guard let k = preferredYarn(), !k.dragging, !eating, !toFood, !goingAway, !leaving else {
+            toPlay = false; return                       // нет мяча/занят — не делаем вид, что бежим
         }
+        if toPlay { targetX = k.x; return }              // уже бежит к мячу — не передумывает на полпути
+
+        // «хочу играть» = насколько не наигрался (1-playSat) × насколько есть силы (energy).
+        // Выдохся (energy низкая) → НЕ играет, лежит и копит силы. Скука с одним мячом гасит интерес
+        // отдельно (playSat). Бодро гоняет снова, отдохнув ИЛИ когда подкинули новый/тронули мяч (playSat=0).
+        let want = (1 - playSat) * ramp(energy, 0.2, 0.6)
+        guard Double.random(in: 0..<1) < want * 0.3 else { return }
         switch st {
-        case .walk:                   toPlay = true; targetX = k.x   // прервать обычную прогулку ради мяча
-        case .idle, .zoomies, .sleep: toPlay = true; targetX = k.x; enter(.walk)   // даже разбудит
-        default: break
+        case .walk:            toPlay = true; targetX = k.x          // прервать обычную прогулку ради мяча
+        case .idle, .zoomies:  toPlay = true; targetX = k.x; enter(.walk)   // откликается, только если бодрствует
+        default: break         // спит — спящего ради мяча НЕ будим
         }
     }
 
-    // Мягкий толчок лапой, по очереди в разные стороны — клубок катается рядом, не улетает.
+    // Толчок лапой, по очереди в разные стороны, разной силой — то слабо, то сильно подбросит.
     func batYarn() {
-        guard let k = yarn else { return }
-        k.vx = playDir * CGFloat.random(in: 4...8)
-        k.vy = 5; k.landed = false
+        guard let k = nearestYarn() else { return }
+        k.vx = playDir * CGFloat.random(in: 3...14)   // сила удара каждый раз разная
+        k.vy = CGFloat.random(in: 3...11)             // иногда подкидывает повыше
+        k.landed = false
         playDir = -playDir                          // следующий раз — в другую сторону
         boredom = max(0, boredom - 0.05)            // игра развлекает
-        playSat = min(1, playSat + 0.03)            // надоедает медленнее → дольше играет
-        if playSat >= 0.85 { playTired = true }     // наигрался — пойдёт отдыхать
+        playSat = min(1, playSat + 0.04)            // от СВОЕЙ игры постепенно надоедает (скучает с одним мячом)
+        if playSat >= 0.85 { playTired = true }
+    }
+
+    // есть ли по курсу бега низкое препятствие (курсор / клубок / лежащий корм), чтобы перепрыгнуть
+    func obstacleAhead(_ dir: CGFloat) -> Bool {
+        let lead: CGFloat = SIZE * 1.7
+        func ahead(_ ox: CGFloat, _ oy: CGFloat) -> Bool {
+            let d = ox - x
+            return d * dir > 0 && abs(d) < lead && (oy - y) < SIZE     // впереди, близко и невысоко
+        }
+        let m = NSEvent.mouseLocation
+        if ahead(m.x, m.y) { return true }
+        for k in yarns where ahead(k.x, k.y) { return true }
+        for c in kibbles where c.landed && ahead(c.x, bottomY()) { return true }
+        return false
     }
 
     func stepPreamble() {
         y = bottomY()
         stTicks += 1
+        let mm = NSEvent.mouseLocation                       // движение курсора за тик (для побудки мышкой)
+        mouseDelta = hypot(mm.x - lastMouseX, mm.y - lastMouseY)
+        lastMouseX = mm.x; lastMouseY = mm.y
         hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
         playSat = max(0, playSat - 0.0006)   // интерес к клубку восстанавливается медленно (дольше отдыхает)
         if playSat <= 0.35 { playTired = false }   // отдохнул — снова можно играть (гистерезис)
@@ -249,33 +273,53 @@ extension AppDelegate {
         var img: NSImage
         switch st {
         case .zoomies:
-            if zoomHop > 0 { hopOffset = CGFloat(sin(Double(10 - zoomHop) / 10.0 * .pi)) * 28; zoomHop -= 1 }
-            else { hopOffset = 0; if Double.random(in: 0..<1) < 0.03 { zoomHop = 10 } }   // иногда подпрыгивает на бегу
             let tx = targetX ?? x
             let dx = tx - x
-            let pose = zoomHop > 0 ? frame("fall", anim / 2) : frame(dx > 0 ? "E" : "W", anim)
+            let west = dx < 0                              // направление бега
+            // прыгает ТОЛЬКО чтобы перепрыгнуть препятствие по курсу (курсор / мяч / лежащий корм) — раньше и выше
+            if zoomHop == 0, obstacleAhead(dx > 0 ? 1 : -1) { zoomHop = 15 }
+            let pose: NSImage
+            if zoomHop > 0 {
+                let step = 15 - zoomHop                    // 0..14
+                hopOffset = CGFloat(sin(Double(step) / 14.0 * .pi)) * 48   // повыше, чтобы уверенно перепрыгнуть
+                pose = frame("jump", min(4, step / 3), flip: west)
+                zoomHop -= 1
+            } else {
+                hopOffset = 0
+                pose = frame(west ? "W" : "E", anim)
+            }
             if abs(dx) <= ZOOM {
                 x = tx
                 zoomReps -= 1
-                if zoomReps <= 0 { enter(.idle); img = frame("idle", 0) }
+                if zoomReps <= 0 {
+                    if Double.random(in: 0..<1) < 0.22 { startWalkabout(); img = frame(west ? "W" : "E", anim) }  // добегался → иногда удирает за экран
+                    else { enter(.idle); img = frame("idle", 0) }
+                }
                 else { targetX = (tx <= leftEdge() + 1) ? rightEdge() : leftEdge(); img = pose }
             } else {
                 x += dx > 0 ? ZOOM : -ZOOM
                 img = pose
             }
         case .walk:
-            let sp: CGFloat = toFood ? FOOD_SPEED : SPEED
+            let rushing = toFood || toPlay                       // к еде/мячу — бежит во весь опор
+            let sp: CGFloat = rushing ? FOOD_SPEED : SPEED
             let tx = targetX ?? x
             let dx = tx - x
             if abs(dx) <= sp {
                 x = tx
                 if leaving { leaving = false; win.orderOut(nil); enter(.away); img = frame("idle", 0) }
                 else if goingAway { enter(.digging); img = frame(awayLeft ? "digL" : "digR", 0) }
-                else if toPlay { toPlay = false; batYarn(); enter(.play); img = frame("held", 0) }
+                else if toPlay {
+                    if let k = nearestYarn(), abs(k.y - y) < SIZE {   // мяч в пределах досягаемости по высоте
+                        toPlay = false; batYarn(); enter(.play); img = frame("held", 0)
+                    } else {                                          // мяч ещё летит сверху — ждём под ним, не бьём воздух
+                        img = frame("alert", 0)
+                    }
+                }
                 else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
             } else {
                 x += dx > 0 ? sp : -sp
-                img = frame(dx > 0 ? "E" : "W", anim / (toFood ? 3 : 5))   // спокойная ходьба — лапы медленнее, трусца к еде — быстрее
+                img = frame(dx > 0 ? "E" : "W", anim / (rushing ? 3 : 5))   // спокойная ходьба — лапы медленнее, бег к цели — быстрее
             }
         case .digging:
             img = frame(awayLeft ? "digL" : "digR", stTicks / 5)   // копает дырку
@@ -329,7 +373,11 @@ extension AppDelegate {
             }
         case .sleep:
             img = frame("sleep", stTicks / 8)
-            if stTicks > stDur { decide() }                 // ест только когда сам проснулся
+            // просыпается сам, КОГДА ВЫСПАЛСЯ; либо его можно РАЗБУДИТЬ МЫШКОЙ (курсор движется рядом).
+            let m = NSEvent.mouseLocation
+            let poke = abs(m.x - x) < SIZE && abs(m.y - y) < SIZE * 1.5 && mouseDelta > 3
+            if energy >= 0.92 { decide() }                  // выспался — встал сам
+            else if poke { enter(.idle) }                   // разбудили мышкой недоспавшим — встанет, походит и снова заснёт
         case .hunt:
             if stTicks < 7 {                                // присел перед прыжком
                 img = frame("alert", 0)

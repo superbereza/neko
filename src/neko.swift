@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.13"
+let VERSION = "1.0.14"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -56,8 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var clingTicks = 0             // сколько висит (чтобы не срывался мгновенно при зацепе)
     var clingPivotV: CGFloat = 0   // скорость пивота-курсора (для ускорения подвеса)
     var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
+    var lastMouseX: CGFloat = 0, lastMouseY: CGFloat = 0   // прошлая позиция курсора
+    var mouseDelta: CGFloat = 0    // насколько курсор сдвинулся за тик (для побудки мышкой)
     var toFood = false         // спешит к корму
-    var yarn: Yarn?            // клубок (одна штука), кот за ним гоняется
+    var yarns: [Yarn] = []     // клубки (можно насыпать несколько), кот гоняется за ближайшим
+    weak var lastPokedYarn: Yarn?  // последний новый/тронутый рукой мяч — к нему интерес выше
+    var lastYarnPalette = -1   // чтобы подряд не выпадал тот же цвет
     var toPlay = false         // спешит к клубку поиграть
     var playSat = 0.0          // 0..1 — насколько клубок надоел (растёт от игры, спадает со временем)
     var playTired = false      // наигрался — отдыхает, пока интерес не восстановится (гистерезис)
@@ -65,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни
-    let FOOD_SPEED: CGFloat = 9 // скорость к корму
+    let FOOD_SPEED: CGFloat = 13 // быстрый бег к корму/клубку (как в zoomies)
     let HUNGER_RATE = 0.0000035 // голод до максимума ~8 ч (как у живой кошки); голодное настроение — вдвое быстрее
     let SATIATION = 0.13        // один катышек насыщает немного — сытный приём это ~3–5 катышков
     let EAT_HUNGER = 0.5        // идёт к корму, проголодавшись (~через 4 ч после еды)
@@ -93,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         "held":    [(3, 1), (5, 2)],            // болтается ногами при переносе
         "fall":    [(1, 2), (1, 3)],            // барахтается лапками в падении
         "hang":    [(1, 2)],                    // висит на курсоре — вытянутые лапы
+        "jump":    [(3, 1), (0, 2), (3, 0), (5, 1), (5, 2)],  // прыжок-разбег (разбег→взлёт→полёт→приземление)
         "eat":     [(7, 2)],                    // ест сверху (голова вниз)
         "digL":    [(4, 0), (4, 1)],            // копает стену слева
         "digR":    [(2, 2), (2, 3)],            // копает стену справа
@@ -172,6 +177,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             engineUtilityItem.state = engine.label == "utility" ? .on : .off
             menu.addItem(engineReflexItem)
             menu.addItem(engineUtilityItem)
+
+            menu.addItem(.separator())
+            let forceItem = NSMenuItem(title: "Force state", action: nil, keyEquivalent: "")
+            let forceMenu = NSMenu()
+            let states: [(String, String)] = [
+                ("Sleep", "sleep"), ("Idle", "idle"), ("Walk", "walk"),
+                ("Zoomies", "zoomies"), ("Walkabout (away)", "away"), ("Dig", "dig"),
+                ("Hunt cursor", "hunt"), ("Play (spawn yarn)", "play"), ("Fall", "fall"),
+            ]
+            for (title, key) in states {
+                let it = NSMenuItem(title: title, action: #selector(forceState(_:)), keyEquivalent: "")
+                it.representedObject = key
+                forceMenu.addItem(it)
+            }
+            forceItem.submenu = forceMenu
+            menu.addItem(forceItem)
         }
 
         menu.addItem(.separator())
@@ -251,16 +272,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return CGFloat.random(in: (s.frame.minX + SIZE)...(s.frame.maxX - SIZE))
     }
 
-    func frame(_ set: String, _ idx: Int) -> NSImage {
+    func frame(_ set: String, _ idx: Int, flip: Bool = false) -> NSImage {
         let arr = sets[set] ?? sets["idle"]!
         let (c, r) = arr[idx % arr.count]
-        let key = "\(c),\(r)"
+        let key = "\(c),\(r)\(flip ? "F" : "")"
         if let cached = cache[key] { return cached }
         let sh = sheet.size.height
         let src = NSRect(x: CGFloat(c) * 32, y: sh - CGFloat(r + 1) * 32, width: 32, height: 32)
         let out = NSImage(size: NSSize(width: SIZE, height: SIZE))
         out.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .none
+        if flip {   // горизонтальное отзеркаливание (для прыжка в другую сторону)
+            let t = NSAffineTransform(); t.translateX(by: SIZE, yBy: 0); t.scaleX(by: -1, yBy: 1); t.concat()
+        }
         sheet.draw(in: NSRect(x: 0, y: 0, width: SIZE, height: SIZE), from: src, operation: .sourceOver, fraction: 1)
         out.unlockFocus()
         cache[key] = out
@@ -440,6 +464,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engineUtilityItem?.state = name == "utility" ? .on : .off
     }
 
+    // дебаг: вручную запустить конкретное состояние
+    @objc func forceState(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        clinging = false; iv.frameCenterRotation = 0; hopOffset = 0
+        toFood = false; toPlay = false; goingAway = false; leaving = false; eating = false; eatingRef = nil
+        switch key {
+        case "sleep":   enter(.sleep)
+        case "idle":    enter(.idle)
+        case "walk":    targetX = randomX(); enter(.walk)
+        case "zoomies": enter(.zoomies)
+        case "away":    startWalkabout()
+        case "dig":     goingAway = true; awayLeft = Bool.random(); enter(.digging)
+        case "hunt":
+            let m = NSEvent.mouseLocation
+            huntStartX = x
+            huntAimX = min(max(m.x, leftEdge()), rightEdge())
+            huntHopH = max(60, min(m.y - y, 200))
+            enter(.hunt)
+        case "play":
+            let px = min(max(x + 150, leftEdge()), rightEdge())
+            let k = makeYarn(x: px, y: bottomY() + 130)
+            k.landed = false; k.vy = 0; k.vx = 0
+            wakeYarnInterest(k)
+        case "fall":
+            fallY = bottomY() + 240; fallVx = CGFloat.random(in: -4...4); fallVy = 0
+            flySpin = 0; flyHang = true; st = .falling
+        default: break
+        }
+    }
+
     @objc func copyDebugState() {
         let s = """
         neko \(VERSION)
@@ -595,10 +649,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func tossYarnMenu() {
         let s = NSScreen.main ?? NSScreen.screens[0]
         let m = NSEvent.mouseLocation
-        if yarn == nil { makeYarn(x: min(max(m.x, s.frame.minX + 10), s.frame.maxX - 10), y: m.y) }
-        if let k = yarn { k.vx = CGFloat.random(in: -16...16); k.vy = 6; k.landed = false }  // придать движение
+        if yarns.count >= 8 { let old = yarns.removeFirst(); old.win.orderOut(nil) }  // лимит окон
+        let k = makeYarn(x: min(max(m.x, s.frame.minX + 10), s.frame.maxX - 10), y: m.y)
+        k.vx = CGFloat.random(in: -16...16); k.vy = 6; k.landed = false   // придать движение
+        wakeYarnInterest(k)   // новый мяч — интерес резко вверх
     }
-    @objc func removeYarnMenu() { yarn?.win.orderOut(nil); yarn = nil; toPlay = false }
+    @objc func removeYarnMenu() {            // убираем ВСЕ клубки
+        for k in yarns { k.win.orderOut(nil) }
+        yarns.removeAll(); toPlay = false; lastPokedYarn = nil
+    }
+
+    // ближайший клубок (не схваченный рукой)
+    func nearestYarn() -> Yarn? {
+        yarns.filter { !$0.dragging }.min(by: { abs($0.x - x) < abs($1.x - x) })
+    }
+    // предпочитаемый мяч: последний тронутый/новый, иначе ближайший
+    func preferredYarn() -> Yarn? {
+        if let k = lastPokedYarn, !k.dragging, yarns.contains(where: { $0 === k }) { return k }
+        return nearestYarn()
+    }
+    // резкий всплеск интереса — ТОЛЬКО на новый или тронутый рукой мяч (не на свою же игру)
+    func wakeYarnInterest(_ k: Yarn?) {
+        playTired = false; playSat = 0; boredom = min(1, boredom + 0.05)
+        if let k = k { lastPokedYarn = k }
+    }
 
     @discardableResult
     func makeYarn(x: CGFloat, y: CGFloat) -> Yarn {
@@ -616,34 +690,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (rgb(255,205,100), rgb(210,150,50)),   // жёлтый
             (rgb(180,150,255), rgb(120,90,210)),   // фиолетовый
             (rgb(255,160,110), rgb(210,110,60)),   // оранжевый
+            (rgb(255,90,90),   rgb(200,50,50)),    // красный
+            (rgb(90,210,210),  rgb(40,150,150)),   // бирюзовый
+            (rgb(185,235,95),  rgb(120,180,40)),   // лаймовый
+            (rgb(240,120,230), rgb(190,70,180)),   // маджента
+            (rgb(120,200,255), rgb(60,140,210)),   // небесный
+            (rgb(255,180,205), rgb(220,120,155)),  // коралловый
+            (rgb(160,255,215), rgb(90,200,155)),   // аквамарин
+            (rgb(210,190,140), rgb(160,140,90)),   // песочный
+            (rgb(150,140,255), rgb(95,80,215)),    // индиго
+            (rgb(255,230,130), rgb(220,180,70)),   // золотистый
         ]
-        let pick = palette.randomElement()!
+        var idx = Int.random(in: 0..<palette.count)
+        if idx == lastYarnPalette { idx = (idx + 1) % palette.count }   // не тот же цвет подряд
+        lastYarnPalette = idx
+        let pick = palette[idx]
         v.ball = pick.0; v.thread = pick.1
         w.contentView = v
         w.setFrameOrigin(NSPoint(x: x - YSIZE / 2, y: y - YSIZE / 2))
         w.orderFrontRegardless()
         let k = Yarn(win: w, view: v, x: x, y: y)
-        v.onBegan = { [weak k] in k?.dragging = true; k?.vx = 0; k?.vy = 0 }
+        v.onBegan = { [weak self, weak k] in k?.dragging = true; k?.vx = 0; k?.vy = 0; self?.lastPokedYarn = k }
         v.onMoved = { [weak k] o in
             guard let k = k else { return }
             let nx = o.x + self.YSIZE / 2, ny = o.y + self.YSIZE / 2
             k.vx = max(-40, min(40, nx - k.x)); k.vy = max(-40, min(40, ny - k.y))   // инерция руки
             k.x = nx; k.y = ny
         }
-        v.onEnded = { [weak k] in k?.dragging = false; k?.landed = false }   // бросок
-        yarn = k
+        v.onEnded = { [weak self, weak k] in k?.dragging = false; k?.landed = false; self?.wakeYarnInterest(k) }   // бросок будит интерес к ЭТОМУ мячу
+        yarns.append(k)
         return k
     }
 
-    func updateYarn() {
-        guard let k = yarn, !k.dragging else { return }
+    func updateYarn() { for k in yarns where !k.dragging { stepYarn(k) } }
+
+    func stepYarn(_ k: Yarn) {
         let s = NSScreen.main ?? NSScreen.screens[0]
         let g = s.frame.minY + YSIZE / 2
         k.vy -= 2.0                          // гравитация
         k.x += k.vx; k.y += k.vy
-        if k.y <= g {                        // отскок от пола, потом покой
+        if k.y <= g {                        // отскок от пола (упругий), потом покой
             k.y = g
-            k.vy = abs(k.vy) > 3 ? abs(k.vy) * 0.4 : 0
+            if abs(k.vy) > 2.5 {
+                var b = abs(k.vy) * 0.55                       // упругий отскок
+                if Double.random(in: 0..<1) < 0.18 { b *= 1.6 }  // иногда скачет сильнее
+                k.vy = b
+            } else { k.vy = 0 }
         }
         k.vx *= 0.97                         // качение с трением
         if abs(k.vx) < 0.2 { k.vx = 0 }
