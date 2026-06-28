@@ -4,12 +4,12 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.9"
+let VERSION = "1.0.10"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
 let SIZE = CGFloat(CELL) * SCALE      // 64
-let SPEED: CGFloat = 4                // мягкая походка
+let SPEED: CGFloat = 2.5              // спокойная ходьба (бег — только в zoomies)
 let TICK = 0.1
 
 func rgb(_ r: Int, _ g: Int, _ b: Int) -> NSColor {
@@ -40,7 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var energy = 0.7           // 0..1 — растёт во сне, тратится в активности
     var boredom = 0.3          // 0..1 — растёт в покое, падает от движения
     var zoomReps = 0           // сколько ещё рывков «носиться»
-    var huntHopH: CGFloat = 60     // высота вертикального прыжка-охоты (к курсору над котом)
+    var zoomHop = 0            // тики текущего подскока на бегу (0 = не прыгает)
+    var huntHopH: CGFloat = 60     // высота прыжка-охоты (к курсору над котом)
+    var huntStartX: CGFloat = 0    // откуда прыгнул
+    var huntAimX: CGFloat = 0      // куда целится (x курсора в момент прыжка)
     var huntCool = 0               // кулдаун между прыжками
     var hoverTicks = 0             // сколько мышь висит над котом (нужно «зависание», не пролёт)
     var clinging = false           // висит на курсоре
@@ -49,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var clingVel: CGFloat = 0      // угловая скорость маятника
     var flySpin: CGFloat = 0       // закрутка в полёте (после срыва с раскачки)
     var flyRot: CGFloat = 0        // накопленный угол вращения в полёте
+    var flyHang = false            // в полёте поза «висения» (вытянутые лапы), а не барахтанье
     var clingTicks = 0             // сколько висит (чтобы не срывался мгновенно при зацепе)
     var clingPivotV: CGFloat = 0   // скорость пивота-курсора (для ускорения подвеса)
     var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
@@ -184,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.saveState() }
         // проверка обновлений при запуске и раз в 6 часов
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.checkForUpdates() }
-        Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
+        Timer.scheduledTimer(withTimeInterval: 2 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
 
         if CommandLine.arguments.contains("--demo-walk") {   // разовый показ ухода
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.startWalkabout() }
@@ -264,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fallY = win.frame.origin.y + SIZE / 2   // откуда падать
         fallVx = max(-42, min(42, iv.throwVel.x * 0.55))      // бросок по параболе (горизонталь шире)
         fallVy = -max(-28, min(28, iv.throwVel.y * 0.55))     // вертикаль скромнее — кот не улетает в космос
+        flyHang = false                         // бросили рукой — барахтается лапами
         st = .falling                           // мягко приземлится на лапы (без отскока)
     }
 
@@ -300,13 +305,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             fallVx = tang * CGFloat(cos(Double(clingAngle)))
             fallVy = -tang * CGFloat(sin(Double(clingAngle)))
             flySpin = clingVel * 1.5                         // закрутка в воздухе
+            flyHang = true                                   // летит в позе висения
             st = .falling
             return
         }
         // подняли выше трети экрана → просто отцепился (без закрутки)
         if clingTicks > 4 && m.y > s.frame.minY + s.frame.height / 3 {
             clinging = false
-            x = cx; fallY = cy; fallVx = 0; fallVy = 0; flySpin = 0
+            x = cx; fallY = cy; fallVx = 0; fallVy = 0; flySpin = 0; flyHang = true
             iv.frameCenterRotation = 0
             st = .falling
             return
@@ -349,11 +355,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if fallY <= ground {
                 fallY = ground
                 fallVx = 0
-                flySpin = 0; flyRot = 0; iv.frameCenterRotation = 0   // приземлился — выпрямился
+                flySpin = 0; flyRot = 0; flyHang = false; iv.frameCenterRotation = 0   // приземлился — выпрямился
                 enter(.idle)
                 iv.image = frame("idle", 0)
             } else {
-                iv.image = frame("fall", anim / 2)   // дрыгает лапками
+                iv.image = flyHang ? frame("hang", 0)        // слетел с курсора — поза висения
+                                   : frame("fall", anim / 2) // бросили — дрыгает лапками
             }
             win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: fallY - SIZE / 2))
             anim += 1
@@ -486,6 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func alert(_ text: String) {
+        NSApp.activate(ignoringOtherApps: true)   // accessory-приложение: иначе окно висит за другими
         let a = NSAlert(); a.messageText = "Neko"; a.informativeText = text; a.runModal()
     }
 
@@ -493,24 +501,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appPath = Bundle.main.bundlePath
         let pid = ProcessInfo.processInfo.processIdentifier
         DispatchQueue.global().async {
-            // качаем + распаковываем, пока живы
-            let dl = Process(); dl.launchPath = "/usr/bin/curl"
-            dl.arguments = ["-fsSL", "-o", "/tmp/neko_up.zip", zipURL]
-            try? dl.run(); dl.waitUntilExit()
-            guard dl.terminationStatus == 0 else { return }
-            // распаковка и подмена — после выхода приложения, затем перезапуск
-            let script = """
-            rm -rf /tmp/neko_up && mkdir -p /tmp/neko_up
-            /usr/bin/ditto -x -k /tmp/neko_up.zip /tmp/neko_up
-            NEW=$(/usr/bin/find /tmp/neko_up -maxdepth 3 -name 'Neko.app' | head -1)
-            [ -z "$NEW" ] && exit 1
-            while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
-            rm -rf '\(appPath)'
-            /usr/bin/ditto "$NEW" '\(appPath)'
-            /usr/bin/xattr -dr com.apple.quarantine '\(appPath)' 2>/dev/null
-            open '\(appPath)'
+            // выполняем шаг и возвращаем статус (всё логируется в /tmp/neko_update.log)
+            func sh(_ cmd: String) -> Int32 {
+                let p = Process(); p.launchPath = "/bin/sh"
+                p.arguments = ["-c", "exec >> /tmp/neko_update.log 2>&1; set -x; " + cmd]
+                try? p.run(); p.waitUntilExit(); return p.terminationStatus
+            }
+            func fail(_ msg: String) { DispatchQueue.main.async { self.alert("Update failed — \(msg)") } }
+
+            // скачиваем и распаковываем, ПОКА приложение живо → ошибки видны пользователю
+            _ = sh("rm -rf /tmp/neko_up /tmp/neko_up.zip && mkdir -p /tmp/neko_up")
+            if sh("/usr/bin/curl -fsSL -o /tmp/neko_up.zip '\(zipURL)'") != 0 { fail("couldn't download"); return }
+            if sh("/usr/bin/ditto -x -k /tmp/neko_up.zip /tmp/neko_up") != 0 { fail("couldn't unpack"); return }
+            if sh("test -n \"$(/usr/bin/find /tmp/neko_up -maxdepth 3 -name Neko.app | head -1)\"") != 0 { fail("bad package"); return }
+
+            // пакет ок — подменяем и перезапускаемся ПОСЛЕ выхода приложения (отдельный процесс переживёт наш выход)
+            let swap = """
+            exec >> /tmp/neko_update.log 2>&1; set -x
+            NEW=$(/usr/bin/find /tmp/neko_up -maxdepth 3 -name Neko.app | head -1)
+            i=0; while kill -0 \(pid) 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+            rm -rf "\(appPath).old"; mv "\(appPath)" "\(appPath).old"
+            /usr/bin/ditto "$NEW" "\(appPath)" || { mv "\(appPath).old" "\(appPath)"; exit 1; }
+            rm -rf "\(appPath).old"
+            /usr/bin/xattr -dr com.apple.quarantine "\(appPath)" 2>/dev/null
+            /usr/bin/open "\(appPath)"
             """
-            let p = Process(); p.launchPath = "/bin/sh"; p.arguments = ["-c", script]
+            let p = Process(); p.launchPath = "/bin/sh"; p.arguments = ["-c", swap]
             try? p.run()
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }

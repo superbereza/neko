@@ -24,7 +24,7 @@ extension AppDelegate {
         case .falling: stDur = 0
         case .hunt:    stDur = 30
         case .play:    stDur = 8
-        case .zoomies: stDur = 0; zoomReps = Int.random(in: 5...10)
+        case .zoomies: stDur = 0; zoomReps = Int.random(in: 5...10); zoomHop = 0
                        targetX = Bool.random() ? leftEdge() : rightEdge()
         }
     }
@@ -107,6 +107,7 @@ extension AppDelegate {
     func utilityDecide() {
         toFood = false; toPlay = false; goingAway = false; leaving = false
         if hunger > EAT_HUNGER, let c = foodTargetX() { toFood = true; targetX = c; enter(.walk); return }
+        if energy > 0.45 && Double.random(in: 0..<1) < 0.10 { enter(.zoomies); return }   // иногда внезапно «носится»
 
         let hour = Calendar.current.component(.hour, from: Date())
         let night = hour >= 23 || hour < 6
@@ -174,11 +175,13 @@ extension AppDelegate {
               st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
         let m = NSEvent.mouseLocation
         let above = m.y - y                         // насколько мышь выше кота
-        if abs(m.x - x) < 70 && above > 30 && above < 260 {   // над котом и в досягаемости
+        if abs(m.x - x) < 130 && above > 45 && above < 250 {   // мышь выше головы и в досягаемости
             hoverTicks += 1
-            if hoverTicks >= 6 {                    // мышь именно ЗАВИСЛА (~0.6с), а не пролетела
+            if hoverTicks >= 6 {                    // мышь зависла (~0.6с), а не пролетела
                 hoverTicks = 0
-                huntHopH = min(above, 150)          // подпрыгнуть к ней (с потолком; выше — не достанет)
+                huntHopH = min(above, 250) - SIZE / 2   // поднять ВЕРХНЮЮ точку кота к курсору (центр на L ниже)
+                huntStartX = x
+                huntAimX = min(max(m.x, leftEdge()), rightEdge())   // прыгает В СТОРОНУ мыши
                 enter(.hunt)
             }
         } else {
@@ -194,7 +197,7 @@ extension AppDelegate {
             if st != .walk { toPlay = false }; return
         }
         switch st {
-        case .walk:                   if toPlay { targetX = k.x }   // уже бежим — правим цель
+        case .walk:                   toPlay = true; targetX = k.x   // прервать обычную прогулку ради мяча
         case .idle, .zoomies, .sleep: toPlay = true; targetX = k.x; enter(.walk)   // даже разбудит
         default: break
         }
@@ -215,8 +218,8 @@ extension AppDelegate {
         y = bottomY()
         stTicks += 1
         hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
-        playSat = max(0, playSat - 0.0012)   // интерес к клубку понемногу восстанавливается
-        if playSat <= 0.4 { playTired = false }   // отдохнул — снова можно играть (гистерезис)
+        playSat = max(0, playSat - 0.0006)   // интерес к клубку восстанавливается медленно (дольше отдыхает)
+        if playSat <= 0.35 { playTired = false }   // отдохнул — снова можно играть (гистерезис)
 
         // потребности: энергия и скука дрейфуют по состоянию
         switch st {
@@ -246,17 +249,19 @@ extension AppDelegate {
         var img: NSImage
         switch st {
         case .zoomies:
+            if zoomHop > 0 { hopOffset = CGFloat(sin(Double(10 - zoomHop) / 10.0 * .pi)) * 28; zoomHop -= 1 }
+            else { hopOffset = 0; if Double.random(in: 0..<1) < 0.03 { zoomHop = 10 } }   // иногда подпрыгивает на бегу
             let tx = targetX ?? x
             let dx = tx - x
+            let pose = zoomHop > 0 ? frame("fall", anim / 2) : frame(dx > 0 ? "E" : "W", anim)
             if abs(dx) <= ZOOM {
                 x = tx
                 zoomReps -= 1
                 if zoomReps <= 0 { enter(.idle); img = frame("idle", 0) }
-                else { targetX = (tx <= leftEdge() + 1) ? rightEdge() : leftEdge()
-                       img = frame(dx > 0 ? "E" : "W", anim) }
+                else { targetX = (tx <= leftEdge() + 1) ? rightEdge() : leftEdge(); img = pose }
             } else {
                 x += dx > 0 ? ZOOM : -ZOOM
-                img = frame(dx > 0 ? "E" : "W", anim)
+                img = pose
             }
         case .walk:
             let sp: CGFloat = toFood ? FOOD_SPEED : SPEED
@@ -270,7 +275,7 @@ extension AppDelegate {
                 else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
             } else {
                 x += dx > 0 ? sp : -sp
-                img = frame(dx > 0 ? "E" : "W", anim / 3)   // свободный счётчик — не застывает при смене цели
+                img = frame(dx > 0 ? "E" : "W", anim / (toFood ? 3 : 5))   // спокойная ходьба — лапы медленнее, трусца к еде — быстрее
             }
         case .digging:
             img = frame(awayLeft ? "digL" : "digR", stTicks / 5)   // копает дырку
@@ -328,19 +333,24 @@ extension AppDelegate {
         case .hunt:
             if stTicks < 7 {                                // присел перед прыжком
                 img = frame("alert", 0)
-            } else if stTicks < 17 {                        // вертикальный подскок к курсору (без сдвига вбок)
-                hopOffset = CGFloat(sin(Double(stTicks - 7) / 10.0 * .pi)) * huntHopH
-                img = frame("fall", anim / 2)               // лапы врастопырку — в прыжке
+            } else if stTicks < 17 {                        // прыжок-дуга В СТОРОНУ мыши
+                let p = CGFloat(stTicks - 7) / 10
+                x = huntStartX + (huntAimX - huntStartX) * p                // летит к мыши по x
+                hopOffset = huntHopH * CGFloat(sin(Double(p) * .pi / 2))    // вверх, пик в конце дуги
+                img = frame("hang", 0)                      // поза как при висении (вытянутые лапы)
                 let m = NSEvent.mouseLocation
-                if abs(m.x - x) < 30 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // достал курсор (промах — только если увёл мышь)
+                if abs(m.x - x) < 12 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // достал курсор (и по x, и по высоте)
                     clinging = true
                     clingPrevX = m.x; clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
                     return                       // сразу висим — без кадра «на земле»
                 }
-            } else {                                        // приземлился
-                hopOffset = 0; huntCool = 12
-                boredom = max(0, boredom - 0.15)            // охота развлекает — снижает скуку
-                enter(.idle); img = frame("idle", 0)
+            } else {                                        // не поймал — падает с верхней точки (без снапа), в позе висения
+                huntCool = 12
+                boredom = max(0, boredom - 0.15)            // охота развлекает
+                fallY = y + hopOffset; fallVx = 0; fallVy = 0; flySpin = 0; flyHang = true
+                hopOffset = 0
+                st = .falling
+                return
             }
         case .play:
             img = frame("held", anim / 3)                   // лапками по клубку — как при подвешивании
