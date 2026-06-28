@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.7"
+let VERSION = "1.0.8"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var zoomReps = 0           // сколько ещё рывков «носиться»
     var huntHopH: CGFloat = 60     // высота вертикального прыжка-охоты (к курсору над котом)
     var huntCool = 0               // кулдаун между прыжками
+    var huntWillCatch = false      // в этот прыжок зацепится (иначе промахнётся, даже если достал)
     var hoverTicks = 0             // сколько мышь висит над котом (нужно «зависание», не пролёт)
     var clinging = false           // висит на курсоре
     var clingPrevX: CGFloat = 0    // прошлый x курсора (для раскачки)

@@ -178,7 +178,8 @@ extension AppDelegate {
             hoverTicks += 1
             if hoverTicks >= 6 {                    // мышь именно ЗАВИСЛА (~0.6с), а не пролетела
                 hoverTicks = 0
-                huntHopH = min(above, 150)          // подпрыгнуть к ней (с потолком)
+                huntHopH = min(above, 150)          // подпрыгнуть к ней (с потолком; выше — не достанет)
+                huntWillCatch = Double.random(in: 0..<1) < 0.6   // иногда промахнётся, даже если достал
                 enter(.hunt)
             }
         } else {
@@ -227,14 +228,17 @@ extension AppDelegate {
         default: break
         }
 
-        // корм привлекает — прерывает беготню/ходьбу/сидение (но не сон/уход)
-        if hunger > EAT_HUNGER && !eating && !goingAway && !leaving, let c = foodTargetX() {
+        // корм привлекает голодного кота и ПРЕРЫВАЕТ почти всё (в т.ч. прогулку «за стену» и копание),
+        // чтобы инфа о корме доходила сразу. Не трогаем только сон / уход за экран / падение / охоту-игру.
+        if hunger > EAT_HUNGER && !eating, let c = foodTargetX() {
             switch st {
             case .walk:
-                toFood = true; toPlay = false; targetX = c   // еда важнее игры
-            case .zoomies, .idle:
+                goingAway = false; leaving = false           // прервать уход на прогулку ради еды
+                toFood = true; toPlay = false; targetX = c
+            case .zoomies, .idle, .digging:
+                goingAway = false; leaving = false
                 toFood = true; toPlay = false; targetX = c; enter(.walk)
-            default: break
+            default: break                                   // sleep/away/falling/hunt/play — не прерываем
             }
         }
     }
@@ -329,7 +333,7 @@ extension AppDelegate {
                 hopOffset = CGFloat(sin(Double(stTicks - 7) / 10.0 * .pi)) * huntHopH
                 img = frame("fall", anim / 2)               // лапы врастопырку — в прыжке
                 let m = NSEvent.mouseLocation
-                if abs(m.x - x) < 40 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // допрыгнул до курсора — цепляется!
+                if huntWillCatch && abs(m.x - x) < 40 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // достал И повезло
                     clinging = true; hopOffset = 0
                     clingPrevX = m.x; clingAngle = 0; clingVel = 0
                 }
