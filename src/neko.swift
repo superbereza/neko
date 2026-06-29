@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.18"
+let VERSION = "1.0.19"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -58,6 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var flyHang = false            // в полёте поза «висения» (вытянутые лапы), а не барахтанье
     var clingTicks = 0             // сколько висит (чтобы не срывался мгновенно при зацепе)
     var clingPivotV: CGFloat = 0   // скорость пивота-курсора (для ускорения подвеса)
+    var clingPrevY: CGFloat = 0    // прошлый y курсора (для детекта неподвижности)
+    var clingStill = 0             // сколько тиков курсор почти не двигается (→ сам спрыгнет)
     var hopOffset: CGFloat = 0     // подъём при прыжке (дуга)
     var lastMouseX: CGFloat = 0, lastMouseY: CGFloat = 0   // прошлая позиция курсора
     var mouseDelta: CGFloat = 0    // насколько курсор сдвинулся за тик (для побудки мышкой)
@@ -95,6 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var engine: CatEngine = ReflexEngine()
     var engineReflexItem: NSMenuItem!, engineUtilityItem: NSMenuItem!
     var forceDebugItem: NSMenuItem!
+    var moodItem: NSMenuItem!    // строка «Today's mood» — обновляется при смене настроения
+    var lastSaveTS = Date().timeIntervalSince1970   // время последнего сейва — для отдыха «вне компа»
+    var bootState: St = .idle    // в каком состоянии стартовать (восстанавливается из сейва)
     var dbgMenuTimer: Timer?     // live-обновление цифр, пока меню открыто
     var checkRow: MenuRowView!, autoRow: MenuRowView!   // нативные строки апдейта (меню не закрывают)
 
@@ -157,7 +162,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(makeAutoUpdateItem())     // чекбокс, меню не закрывается
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "About Neko", action: #selector(aboutMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Today's mood: \(mood.label)", action: nil, keyEquivalent: ""))  // приятная строка для всех
+        moodItem = NSMenuItem(title: "Today's mood: \(mood.label)", action: nil, keyEquivalent: "")  // приятная строка для всех
+        menu.addItem(moodItem)
         menu.addItem(NSMenuItem(title: "Neko \(VERSION)", action: nil, keyEquivalent: ""))
 
         // Дебаг-секция — ТОЛЬКО при спец-запуске (--debug / NEKO_DEBUG=1). В обычной сборке её нет.
@@ -213,7 +219,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshDebug()
 
         registerFoodHotkey()
-        enter(.sleep)
+        enter(bootState)               // восстановленное состояние, а не всегда сон
+        if bootState == .walk { targetX = randomX() }   // прогулке нужна цель, иначе мгновенно «дойдёт»
         // .common — чтобы кот продолжал двигаться при открытом меню
         let tickT = Timer(timeInterval: TICK, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(tickT, forMode: .common)
@@ -221,6 +228,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // проверка обновлений при запуске и раз в 6 часов
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.checkForUpdates() }
         Timer.scheduledTimer(withTimeInterval: 2 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
+        // настроение меняется несколько раз в день (каждые ~6 ч)
+        Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.rerollMood() }
+        // ноут проснулся (крышку открыли) → начислить коту отдых за время сна системы
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemDidWake),
+                                                          name: NSWorkspace.didWakeNotification, object: nil)
+        // CSV-лог состояний раз в 5с (только в дебаге) — числовые кривые нужд для графиков
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.logStateSample() }
 
         if CommandLine.arguments.contains("--demo-walk") {   // разовый показ ухода
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.startWalkabout() }
@@ -312,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fallVy = -max(-28, min(28, iv.throwVel.y * 0.55))     // вертикаль скромнее — кот не улетает в космос
         flyHang = false                         // бросили рукой — барахтается лапами
         st = .falling                           // мягко приземлится на лапы (без отскока)
+        elog("drag_end", ["vx": Double(fallVx), "vy": Double(fallVy)])
     }
 
     // Висит на курсоре как настоящий маятник с движущимся подвесом:
@@ -321,6 +336,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let s = NSScreen.main ?? NSScreen.screens[0]
         let m = NSEvent.mouseLocation
         clingTicks += 1
+        if hypot(m.x - clingPrevX, m.y - clingPrevY) < 2 { clingStill += 1 } else { clingStill = 0 }
+        clingPrevY = m.y
         let dt = CGFloat(TICK)
         let L = SIZE * 0.5                                   // длина «нити» (курсор → центр кота)
         let g: CGFloat = 800                                // «гравитация» (период ≈ 1.3 c)
@@ -354,6 +371,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // подняли выше трети экрана → отцепился (после короткой крепкой фазы)
         if clingTicks > 12 && m.y > s.frame.minY + s.frame.height / 3 {
+            clinging = false
+            x = cx; fallY = cy; fallVx = 0; fallVy = 0; flySpin = 0; flyHang = true
+            iv.frameCenterRotation = 0
+            st = .falling
+            return
+        }
+        // курсор давно не двигается (~4.5с) → коту надоело, сам спрыгивает
+        if clingTicks > 15 && clingStill > 45 {
             clinging = false
             x = cx; fallY = cy; fallVx = 0; fallVy = 0; flySpin = 0; flyHang = true
             iv.frameCenterRotation = 0
@@ -409,7 +434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // прощающий захват: попал в ОБЛАСТЬ вокруг курсора (не пиксель-точность) → цепляется
                 if hypot(m.x - x, m.y - fallY) < SIZE * 0.6 {
                     hunting = false; clinging = true
-                    clingPrevX = m.x; clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
+                    clingPrevX = m.x; clingPrevY = m.y; clingStill = 0
+                    clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
                     iv.frameCenterRotation = 0
                     return
                 }
@@ -427,6 +453,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 
     @objc func walkMenu() { startWalkabout() }
+
+    // настроение меняется несколько раз в день (не одно на весь день)
+    func rerollMood() {
+        let all = Mood.allCases
+        var m = all.randomElement() ?? mood
+        if all.count > 1 { while m == mood { m = all.randomElement() ?? m } }   // не то же самое подряд
+        mood = m
+        moodItem?.title = "Today's mood: \(mood.label)"
+    }
 
     // «Позвать котика» — вернуть на видимый экран к курсору, если он ушёл гулять/пропал (противоположность Go for a walk)
     @objc func comeHereMenu() {
@@ -608,6 +643,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // действует со следующего запуска (дебаг-секция вычисляется на старте); сейчас уже в дебаге
     }
 
+    // CSV-лог реальных состояний (раз в 10с) → ~/Library/Logs/neko-state.csv для аналитики модели нужд
+    func logStateSample() {
+        guard debugBuild else { return }
+        let fm = FileManager.default
+        let path = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/neko-state.csv")
+        let header = "epoch,time,state,energy,boredom,hunger,mood,x\n"
+        // ротация по размеру: > 15 МБ → в .csv.1 (одна резервная). Итого ≤ ~30 МБ.
+        if let sz = (try? fm.attributesOfItem(atPath: path)[.size]) as? Int, sz > 15_000_000 {
+            let bak = path + ".1"; try? fm.removeItem(atPath: bak); try? fm.moveItem(atPath: path, toPath: bak)
+        }
+        if !fm.fileExists(atPath: path) {
+            try? header.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        let now = Date()
+        let row = String(format: "%.0f,%@,%@,%.3f,%.3f,%.3f,%@,%d\n",
+                         now.timeIntervalSince1970, ISO8601DateFormatter().string(from: now),
+                         st.label, energy, boredom, hunger, mood.label, Int(x))
+        if let h = FileHandle(forWritingAtPath: path) { h.seekToEndOfFile(); h.write(Data(row.utf8)); try? h.close() }
+    }
+
+    // структурный лог событий → ~/Library/Logs/neko-events.jsonl: переходы, решения мозга, инпуты из мира
+    func elog(_ kind: String, _ data: [String: Any] = [:]) {
+        guard debugBuild else { return }
+        let fm = FileManager.default
+        let path = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/neko-events.jsonl")
+        if let sz = (try? fm.attributesOfItem(atPath: path)[.size]) as? Int, sz > 35_000_000 {  // ≤ ~70 МБ с .1
+            let bak = path + ".1"; try? fm.removeItem(atPath: bak); try? fm.moveItem(atPath: path, toPath: bak)
+        }
+        func r(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
+        var obj: [String: Any] = ["t": Date().timeIntervalSince1970, "kind": kind, "st": st.label,
+                                  "e": r(energy), "b": r(boredom), "h": r(hunger), "mood": mood.label]
+        data.forEach { obj[$0] = $1 }
+        guard let d = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: d, encoding: .utf8) else { return }
+        let line = Data((s + "\n").utf8)
+        if let fh = FileHandle(forWritingAtPath: path) { fh.seekToEndOfFile(); fh.write(line); try? fh.close() }
+        else { try? line.write(to: URL(fileURLWithPath: path)) }
+    }
+
     // лог поведения в дебаг-режиме → /tmp/neko_debug.log (чтобы потом видеть «что было с котом»)
     func dlog(_ msg: String) {
         guard debugBuild, debug else { return }
@@ -702,12 +776,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Сохранение состояния (переживает перезапуск/обновление)
+    // отдых за реальное время «вне компа» (ноут спал/закрыт): энергия восстанавливается, как будто кот спал.
+    // полный отдых примерно за 2 ч отсутствия; короткие паузы дают чуть-чуть.
+    func creditRest(_ seconds: Double) {
+        guard seconds > 60 else { return }                 // меньше минуты — не считаем
+        let before = energy
+        energy = min(1, energy + seconds / 7200)           // 1.0 за ~2 ч
+        boredom = min(1, boredom + seconds / 14400)        // и чуть соскучился, пока никого не было
+        lastSaveTS = Date().timeIntervalSince1970
+        dlog(String(format: "rest +%.2f energy за %.0f мин (вне компа)", energy - before, seconds / 60))
+        elog("rest", ["sec": seconds, "gain": energy - before])
+    }
+    @objc func systemDidWake() {                           // ноут проснулся (крышку открыли) — приложение не выключалось
+        creditRest(Date().timeIntervalSince1970 - lastSaveTS)
+    }
+
     func saveState() {
         let d = UserDefaults.standard
+        lastSaveTS = Date().timeIntervalSince1970
+        d.set(lastSaveTS, forKey: "neko.savedAt")          // когда сохранили — чтобы начислить отдых при следующем запуске
         d.set(energy, forKey: "neko.energy")
         d.set(boredom, forKey: "neko.boredom")
         d.set(hunger, forKey: "neko.hunger")
         d.set(Double(x), forKey: "neko.x")
+        d.set(st.label, forKey: "neko.state")              // чтобы стартовать осмысленно, а не всегда «спать»
         let arr = kibbles.filter { $0.landed }.map {
             ["x": Double($0.x), "y": Double($0.y), "eaten": $0.eaten, "max": $0.maxBites]
         }
@@ -721,6 +813,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             hunger = min(1, max(0, d.double(forKey: "neko.hunger")))   // старое сохранение могло быть сырым счётчиком
             if let xx = d.object(forKey: "neko.x") as? Double {        // не дать спрятаться за краем (если ушёл гулять перед выходом)
                 x = min(max(CGFloat(xx), leftEdge()), rightEdge())
+            }
+            if let ts = d.object(forKey: "neko.savedAt") as? Double {  // отсыпание за время, пока приложение не работало
+                creditRest(Date().timeIntervalSince1970 - ts)
+            }
+            // бесшовно: восстанавливаем стабильное состояние (и координату x — уже выше); переходные → idle
+            switch d.string(forKey: "neko.state") {
+            case "sleeping": bootState = .sleep
+            case "walking":  bootState = .walk
+            case "zoomies":  bootState = .zoomies
+            default:         bootState = .idle      // digging/away/falling/hunting/playing — безопасно в idle
             }
         }
         if let arr = d.array(forKey: "neko.kibbles") as? [[String: Any]] {
@@ -759,6 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let k = makeYarn(x: min(max(m.x, s.frame.minX + 10), s.frame.maxX - 10), y: m.y)
         k.vx = CGFloat.random(in: -16...16); k.vy = 6; k.landed = false   // придать движение
         wakeYarnInterest(k)   // новый мяч — интерес резко вверх
+        elog("yarn_toss", ["count": yarns.count])
     }
     @objc func removeYarnMenu() {            // убираем ВСЕ клубки
         for k in yarns { k.win.orderOut(nil) }
@@ -862,6 +965,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let m = NSEvent.mouseLocation
         let cx = min(max(m.x, s.frame.minX + 8), s.frame.maxX - 8)
         makeKibble(x: cx, y: m.y - 7, maxBites: Int.random(in: 3...4))
+        elog("feed", ["x": Double(cx), "kibbles": kibbles.count])
     }
 
     @discardableResult

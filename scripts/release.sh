@@ -17,6 +17,10 @@ sed -i '' -E "s/let VERSION = \"[0-9.]+\"/let VERSION = \"$VER\"/" src/neko.swif
 ditto -c -k --keepParent dist/Neko.app dist/Neko.zip
 scripts/dmg.sh >/dev/null
 
+# 2.5) smoke-тест артефактов — кривой релиз падает ДО публикации
+chmod +x scripts/verify-release.sh
+scripts/verify-release.sh "$VER"
+
 # 3) коммит и тег
 git add -A
 git commit -q -m "Neko $VER" || true

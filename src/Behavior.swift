@@ -4,7 +4,7 @@ import Cocoa
 extension AppDelegate {
     func enter(_ s: St) {
         st = s; stTicks = 0; hopOffset = 0
-        dlog("→ \(s.label)")
+        dlog("→ \(s.label)"); elog("enter")
         if s != .walk { returningToSleep = false }   // флаг живёт только для возвратной прогулки с улицы
         hunting = false                               // охотничий полёт сбрасывается при любой смене состояния
         // гасим несовместимые намерения, чтобы не возникало невозможных комбинаций
@@ -164,6 +164,7 @@ extension AppDelegate {
             for (s, w) in weights { if r < max(0, w) { pick = s; break }; r -= max(0, w) }
         }
 
+        elog("decide", ["pick": pick.label, "uSleep": uSleep, "uWalk": uWalk, "uZoom": uZoom, "uIdle": uIdle, "act": act])
         let awayChance = (mood == .curious) ? 0.16 : 0.07
         switch pick {
         case .zoomies: enter(.zoomies)
@@ -218,6 +219,7 @@ extension AppDelegate {
         }
         if huntInterest >= threshold {
             if st == .walk && Double.random(in: 0..<1) < 0.35 { huntInterest = 0; return }  // на ходу иногда «передумал»
+            elog("hunt", ["interest": huntInterest, "dist": dist])
             huntInterest = 0
             huntAimX = min(max(m.x, leftEdge()), rightEdge())
             huntAimY = min(m.y, bottomY() + 320)        // цель прыжка = точка курсора (с потолком по высоте)
