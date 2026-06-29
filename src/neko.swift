@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.20"
+let VERSION = "1.0.21"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -74,6 +74,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var playDir: CGFloat = 1   // в какую сторону толкнуть в этот раз (чередуется)
     var playCool = 0           // пауза после удара по мячу — не семенить вокруг, дать ему отлететь
     var returningToSleep = false  // вернулся с прогулки уставшим → лечь спать на экране
+    var leaping = false           // прыжок между мониторами (баллистика на другой экран)
+    weak var leapScreen: NSScreen? // монитор-назначение прыжка
+    var leapTicks = 0             // тики в текущей дуге прыжка
+    var leapSteps = 18            // сколько тиков длится текущая дуга
+    var leapDown = false          // прыжок вниз (спрыгивание) — другая раскадровка
+    var leapWait = 0              // «присматривается» перед прыжком (тики)
+    var leapBounce = false        // прыжок вверх с отскоком от стены
+    var leapPhase = 0             // фаза bounce-прыжка: 0 = к стене, 1 = от стены наверх
+    var leapTX: CGFloat = 0       // финальная цель по X (для фазы 2 bounce)
+    var leapTY: CGFloat = 0       // финальная цель по Y (пол монитора-назначения)
+    var leapTan: CGFloat = 0      // сглаженная касательная (чтобы наклон в полёте был под контролем)
+    var leapWait0 = 1             // исходная длительность фазы подготовки (для под-фаз прицел→присед)
+    var leapSalto = false         // прыжок от стены через сальто (иногда — для красоты)
+    var leapSpin: CGFloat = 0     // накопленный угол сальто
+    var leapSpinStep: CGFloat = 0 // прирост угла сальто за тик (оборот завершается к вершине)
     var comeHereSpeed: CGFloat = 0 // скорость забега с края при «Come here» (0 = обычная ходьба)
     var huntAir = 0               // тики в охотничьем полёте (чтобы не «прилипал» к курсору мгновенно)
     var eatingRef: Kibble?     // что грызёт сейчас
@@ -152,7 +167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // настроение дня (детерминированно по дню года → меняется день ото дня)
         let day = Calendar.current.ordinality(of: .day, in: .year, for: Date()) ?? 0
         mood = Mood.allCases[day % Mood.allCases.count]
-        restoreState()   // восстановить потребности, позицию и корм
+        restoreState()   // восстановить потребности, позицию, монитор и корм
+        y = bottomY()    // пересчитать пол под восстановленный монитор
         engine = makeEngine(UserDefaults.standard.string(forKey: "neko.engine") ?? "utility")
         win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
         win.orderFrontRegardless()
@@ -237,6 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 ("Sleep", "sleep"), ("Idle", "idle"), ("Walk", "walk"),
                 ("Zoomies", "zoomies"), ("Walkabout (away)", "away"), ("Dig", "dig"),
                 ("Hunt cursor", "hunt"), ("Play (spawn yarn)", "play"), ("Fall", "fall"),
+                ("Leap ↑ monitor", "leapup"), ("Leap ↑ w/ wall bounce", "leapbounce"),
+                ("Leap ↓ monitor", "leapdown"), ("Leap → other monitor", "leap"),
             ]
             for (title, key) in states {
                 let it = NSMenuItem(title: title, action: #selector(forceState(_:)), keyEquivalent: "")
@@ -347,6 +365,230 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             && s.frame.minY < c.maxY && s.frame.maxY > c.minY                      // и есть перекрытие по вертикали (можно дойти пешком)
         }.min(by: { abs($0.frame.midX - c.midX) < abs($1.frame.midX - c.midX) })
     }
+    // монитор СВЕРХУ/СНИЗУ (с перекрытием по X) — туда прыжком/спрыгиванием
+    func verticalNeighbor(up: Bool) -> NSScreen? {
+        let c = curScreen().frame
+        return NSScreen.screens.filter { s in
+            s.frame != c
+            && (up ? s.frame.minY >= c.maxY - 2 : s.frame.maxY <= c.minY + 2)
+            && s.frame.minX < c.maxX && s.frame.maxX > c.minX
+        }.min(by: { abs($0.frame.midY - c.midY) < abs($1.frame.midY - c.midY) })
+    }
+    func anyOtherScreen() -> NSScreen? {                 // ближайший любой другой монитор
+        let c = curScreen().frame
+        return NSScreen.screens.filter { $0.frame != c }
+            .min(by: { hypot($0.frame.midX-c.midX,$0.frame.midY-c.midY) < hypot($1.frame.midX-c.midX,$1.frame.midY-c.midY) })
+    }
+
+    // ось лётного кадра прыжка (флюгер): наклон = угол скорости − ось (как в раскадровках sprite-tools)
+    func leapAxis(_ c: Int, _ r: Int) -> CGFloat {
+        switch (c, r) { case (0,3): return 90; case (0,2): return 60; case (3,0): return 0; case (5,1): return -35; default: return 0 }
+    }
+    // дискретно-точная вертикальная скорость, чтобы за T тиков ровно прийти из fromY в toY
+    // (интегратор: fallVy += 6; fallY -= fallVy → Σ 6i = 3T(T+1))
+    func solveVy(from fromY: CGFloat, to toY: CGFloat, ticks T: Int) -> CGFloat {
+        -((toY - fromY) / CGFloat(T) + 3 * CGFloat(T + 1))
+    }
+    // наклон спрайта по «флюгеру» с учётом зеркала: при flip нос смотрит в (180−ось),
+    // поэтому наклон = касательная − (180−ось). Без зеркала — касательная − ось.
+    func leapTilt(_ c: Int, _ r: Int, tangent: CGFloat, flip: Bool) -> CGFloat {
+        let a = leapAxis(c, r)
+        let base = flip ? (180 - a) : a
+        var raw = tangent - base
+        while raw > 180 { raw -= 360 }; while raw < -180 { raw += 360 }   // нормализуем
+        return max(-90, min(90, raw))
+    }
+    // куда целиться по X на экране dst: в сторону, где БОЛЬШЕ места, на долю этого простора (с вариативностью).
+    // у края → прыгает к центру; у центра → в чуть более просторную сторону; никогда не через весь экран на дальний край.
+    func leapTargetX(on dst: NSScreen) -> CGFloat {
+        let lo = dst.frame.minX + SIZE / 2, hi = dst.frame.maxX - SIZE / 2
+        guard hi > lo else { return (lo + hi) / 2 }
+        let cx = min(max(x, lo), hi)                       // текущий X, спроецированный на экран назначения
+        let leftRoom = cx - lo, rightRoom = hi - cx
+        let toRight = rightRoom >= leftRoom                 // в сторону, где простора больше
+        let room = toRight ? rightRoom : leftRoom
+        let dist = max(SIZE * 1.5, room * CGFloat.random(in: 0.3...0.65))   // доля простора + разброс → вариативность
+        return min(max(toRight ? cx + dist : cx - dist, lo), hi)
+    }
+    // баллистика дуги ВВЕРХ: подняться до вершины (toY + clr), затем сесть ровно на toY в точке toX.
+    // clr — небольшой запас над целью (1–2 роста), чтобы не выпрыгивать на пол-экрана.
+    func upArc(fromX sx: CGFloat, fromY sy: CGFloat, toX tx: CGFloat, toY ty: CGFloat, clr: CGFloat) -> (vx: CGFloat, vy: CGFloat, steps: Int) {
+        let g: CGFloat = 6
+        let Hu = max(SIZE * 0.5, (ty - sy) + clr)          // высота подъёма до вершины
+        let v0 = -(2 * g * Hu).squareRoot()                // стартовая вертикаль (вверх)
+        let tUp = -v0 / g                                   // тиков до вершины
+        let tDown = (2 * clr / g).squareRoot()              // тиков с вершины до пола
+        let T = max(10, Int((tUp + tDown).rounded()))
+        return ((tx - sx) / CGFloat(T), v0, T)
+    }
+    // запуск прыжка на другой монитор: баллистика к полу монитора-назначения
+    func launchLeap(to screen: NSScreen, bounce: Bool = false) {
+        toFood = false; toPlay = false; goingAway = false; leaving = false; eating = false; clinging = false; hunting = false
+        flyHang = false; flySpin = 0; flyRot = 0; leapSpin = 0; leapSalto = false
+        let ty = screen.frame.minY + SIZE / 2 - FOOT
+        let tx = leapTargetX(on: screen)                  // в сторону, где больше места (с вариативностью)
+        leapDown = ty < y
+        leapScreen = screen; leapTicks = 0; leaping = true; leapBounce = false; leapPhase = 0
+        leapTX = tx; leapTY = ty
+        fallY = y
+        if leapDown {
+            // СПРЫГИВАНИЕ (раскадровка drop): 5,2 присматривается у края → 5,1 нос вниз → 5,2 на земле → 3,1.
+            // Никакого подскока вверх — свободное падение с горизонтальным разгоном.
+            // h = y - ty (>0); при v0=0 пройдём h = 3T(T+1) → решаем T.
+            let h = y - ty
+            let T = max(8, Int(((-1 + (1 + 4 * h / 3).squareRoot()) / 2).rounded()))
+            leapSteps = T
+            fallVx = (tx - x) / CGFloat(T)
+            fallVy = 0                       // стартует с места — сначала присматривается (5,2), потом чпок вниз
+            leapWait = 16                    // сидит у края и смотрит вниз перед прыжком
+        } else if bounce, let wall = nearWallX() {
+            // ПРЫЖОК С ОТСКОКОМ (раскадровка wall, в стиле Assassin's Creed):
+            // фаза 0 — мощно к стене и кот достаёт её на ВОСХОДЯЩЕЙ дуге (ещё летит вверх),
+            // фаза 1 — энергично отталкивается от стены наверх к монитору (иногда через сальто).
+            leapBounce = true                            // сальто решаем на 2-й фазе (только если прыгает с запасом)
+            let wy = y + (ty - y) * 0.5                  // контакт со стеной ~ на середине высоты
+            let R = wy - y                                // подъём до контакта
+            let apexRise = R * 1.4                        // вершина ВЫШЕ контакта → у стены ещё летит вверх
+            let v0 = -(12 * apexRise).squareRoot()        // стартовая вертикаль (вверх)
+            let disc = max(0, v0 * v0 - 12 * R)
+            let TA = max(6, Int(((-v0 - disc.squareRoot()) / 6).rounded()))   // момент пересечения wy на ВОСХОДЯЩЕЙ ветви
+            leapSteps = TA
+            fallVx = (wall - x) / CGFloat(TA)
+            fallVy = v0
+            leapWait = 16                                 // собирается перед прыжком на стену
+        } else {
+            // ПРЯМОЙ ПРЫЖОК ВВЕРХ (раскадровка jump): 0,3 толчок → 0,2 → вершина 3,0 → 5,1 → 5,2 → 3,1.
+            // Плоская парабола в сторону простора, небольшой запас вверх (1–2 роста).
+            let clr = CGFloat.random(in: SIZE...(SIZE * 2))
+            let arc = upArc(fromX: x, fromY: y, toX: tx, toY: ty, clr: clr)
+            fallVx = arc.vx; fallVy = arc.vy; leapSteps = arc.steps
+            leapWait = 16                                 // прицеливается и собирается перед прыжком
+        }
+        leapWait0 = max(1, leapWait)
+        leapTan = CGFloat(atan2(Double(-(fallVy + 6)), Double(fallVx)) * 180 / .pi)   // старт сглаживания (с учётом первого тика гравитации)
+        elog("leap", ["to": screenNumber(screen), "down": leapDown ? 1 : 0, "bounce": bounce ? 1 : 0])
+    }
+    // ближайшая боковая стена ТЕКУЩЕГО монитора (для отскока)
+    func nearWallX() -> CGFloat? {
+        let f = curScreen().frame
+        let left = f.minX + SIZE / 2, right = f.maxX - SIZE / 2
+        return (abs(x - left) < abs(x - right)) ? left : right
+    }
+    // кадр+наклон лётной дуги прыжка вверх (общая раскадровка для прямого прыжка и фаз отскока)
+    func leapUpFrame(_ p: CGFloat, flip: Bool) {
+        let c: Int, r: Int, tilt: Bool
+        switch p {                                       // jump.png: 0,3 → 0,2 → 3,0 → 5,1 → 5,2
+        case ..<0.16: (c, r, tilt) = (0, 3, false)       // толчок (не крутим)
+        case ..<0.55: (c, r, tilt) = (0, 2, true)        // взлёт
+        case ..<0.80: (c, r, tilt) = (3, 0, true)        // вершина
+        case ..<1.00: (c, r, tilt) = (5, 1, true)        // снижение
+        default:      (c, r, tilt) = (5, 2, false)       // посадка (не крутим)
+        }
+        iv.image = frameCell(c, r, flip: flip)
+        iv.frameCenterRotation = tilt ? leapTilt(c, r, tangent: leapTan, flip: flip) : 0
+    }
+    // короткая дуга ОТ стены (раскадровка wall, фаза 2): 3,0 взлёт → 5,1 снижение → 5,2 посадка.
+    // Без приседа/0,2 — кот уже оттолкнулся; меньше смен кадров → не дёргается на короткой дуге.
+    func leapBounceFrame(_ p: CGFloat, flip: Bool) {
+        let c: Int, r: Int, tilt: Bool
+        switch p {
+        case ..<0.45: (c, r, tilt) = (3, 0, true)        // взлёт от стены
+        case ..<0.85: (c, r, tilt) = (5, 1, true)        // снижение
+        default:      (c, r, tilt) = (5, 2, false)       // посадка
+        }
+        iv.image = frameCell(c, r, flip: flip)
+        iv.frameCenterRotation = tilt ? leapTilt(c, r, tangent: leapTan, flip: flip) : 0
+    }
+    // приземление: гасит скорость не сидя, а пробежкой пары шагов по ходу полёта
+    func leapLand(on dst: NSScreen) {
+        homeScreen = dst
+        y = dst.frame.minY + SIZE / 2 - FOOT; fallY = y
+        x = min(max(leapTX, leftEdge()), rightEdge())     // ровно в намеченную точку (а не «куда успел») — без рывка к кромке
+        iv.frameCenterRotation = 0; leaping = false; leapBounce = false; leapPhase = 0; leapSpin = 0
+        returningToSleep = false                                    // приземлился бодро — не уходит сразу спать
+        let dir: CGFloat = fallVx < 0 ? -1 : 1                       // добегает по инерции в сторону полёта
+        let dist = CGFloat.random(in: SIZE * 0.8 ... SIZE * 1.8)
+        targetX = min(max(x + dir * dist, leftEdge()), rightEdge())
+        comeHereSpeed = 6                                            // бодрый добег, потом сам встанет в idle
+        enter(.walk)
+        iv.image = frameCell(3, 1, flip: fallVx < 0)                 // «гашу скорость»
+    }
+    // шаг прыжка между мониторами (отдельная физика с раскадровкой и наклоном; уверенный полёт по параболе)
+    func leapStep() {
+        guard let dst = leapScreen else { leaping = false; return }
+        // фаза подготовки «прицеливается/собирается» (или короткий контакт со стеной) — окно не двигаем
+        if leapWait > 0 {
+            leapWait -= 1
+            iv.frameCenterRotation = 0
+            if leapBounce && leapPhase == 1 {                        // у стены: НЕ поза полёта, коротко оттолкнуться
+                iv.image = frameCell(0, 3, flip: fallVx > 0)         // упёрся в стену, поджался к толчку
+            } else if leapDown {
+                iv.image = frameCell(5, 2, flip: leapTX < x)         // присматривается у края, мордой по ходу прыжка
+            } else if leapBounce {                                   // присед к толчку в сторону стены
+                iv.image = frameCell(0, 3, flip: fallVx < 0)
+            } else {                                                 // прямой прыжок вверх: присед перед толчком (без алёрта)
+                iv.image = frameCell(0, 3, flip: leapTX < x)
+            }
+            anim += 1
+            return
+        }
+        leapTicks += 1
+        fallVy += 6; fallY -= fallVy; x += fallVx
+        let p = min(1, CGFloat(leapTicks) / CGFloat(leapSteps))
+        let west = fallVx < 0
+        // наклон = текущая касательная к траектории (без межтикового сглаживания: на вершине угол
+        // заворачивается через ±180°, и сглаживание гнало бы его «длинным путём» → наклон не в попад).
+        // нормализацию/зеркало берёт на себя leapTilt.
+        leapTan = CGFloat(atan2(Double(-fallVy), Double(fallVx)) * 180 / .pi)
+
+        if leapDown {                                    // drop: 5,1 нос вниз по дуге → 5,2 на земле
+            if p < 0.85 {
+                iv.image = frameCell(5, 1, flip: west)
+                iv.frameCenterRotation = leapTilt(5, 1, tangent: leapTan, flip: west)
+            } else {
+                iv.image = frameCell(5, 2, flip: west); iv.frameCenterRotation = 0
+            }
+        } else if leapBounce && leapPhase == 0 {         // wall фаза 0: к стене, ЛИЦОМ к стене (зеркально)
+            let toWall = west
+            iv.image = frameCell(p < 0.5 ? 0 : 3, p < 0.5 ? 2 : 0, flip: toWall)
+            iv.frameCenterRotation = leapTilt(p < 0.5 ? 0 : 3, p < 0.5 ? 2 : 0, tangent: leapTan, flip: toWall)
+        } else if leapBounce && leapPhase == 1 && leapSalto && fallVy < 0 {   // сальто ТОЛЬКО на восходящей (вверху дуги)
+            leapSpin += leapSpinStep                            // оборот завершается к вершине
+            iv.frameCenterRotation = leapSpin
+            iv.image = frameCell(0, 2, flip: west)              // поджался в комок
+        } else if leapBounce && leapPhase == 1 {         // взлёт/снижение/посадка — нормальная ориентация (3,0→5,1→5,2)
+            leapBounceFrame(p, flip: west)
+        } else {                                         // прямой прыжок вверх — полная дуга jump
+            leapUpFrame(p, flip: west)
+        }
+
+        // фаза 0 отскока завершается достижением стены → толчок наверх (фаза 1)
+        if leapBounce && leapPhase == 0 && leapTicks >= leapSteps {
+            leapPhase = 1
+            x = nearWallX() ?? x                         // прижались к стене
+            leapTX = leapTargetX(on: dst)                // от стены — в сторону простора (с вариативностью)
+            // сальто — редкое (20%) и ТОЛЬКО когда отскок «с запасом» (высокая дуга); впритык — без сальто
+            leapSalto = Double.random(in: 0..<1) < 0.2
+            let clr = leapSalto ? CGFloat.random(in: SIZE * 2.5 ... SIZE * 4)   // высокий заброс — есть где крутить сальто
+                                : CGFloat.random(in: SIZE ... SIZE * 2)         // обычный/впритык
+            let arc = upArc(fromX: x, fromY: fallY, toX: leapTX, toY: leapTY, clr: clr)
+            fallVx = arc.vx; fallVy = arc.vy; leapSteps = arc.steps; leapTicks = 0; leapSpin = 0
+            let ascend = max(1, Int((-fallVy) / 6))      // тиков до вершины — за них и крутим полный оборот
+            leapSpinStep = (fallVx < 0 ? 1 : -1) * 360 / CGFloat(ascend)
+            leapTan = CGFloat(atan2(Double(-(fallVy + 6)), Double(fallVx)) * 180 / .pi)
+            leapWait = 2; leapWait0 = 2                   // буквально оттолкнуться — очень короткий контакт
+            win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: fallY - SIZE / 2))
+            anim += 1
+            return
+        }
+        // приземление: по тикам ИЛИ как только на снижении достигли пола цели
+        let reachedFloor = fallVy > 0 && fallY <= leapTY
+        if leapTicks >= leapSteps || reachedFloor {
+            leapLand(on: dst)
+        }
+        win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: fallY - SIZE / 2))
+        anim += 1
+    }
     // куда уходить гулять: с уклоном «домой» (к экрану с курсором) — сильнее у домоседных настроений
     func chooseWanderDir() -> Bool {                   // true = влево
         let homeBias: Double = { switch mood { case .lazy, .playful: return 0.8; case .curious: return 0.3; default: return 0.55 } }()
@@ -381,6 +623,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         out.unlockFocus()
         cache[key] = out
         return out
+    }
+
+    // отрисовать ПРОИЗВОЛЬНУЮ клетку (col,row) — для раскадровки прыжка между мониторами
+    func frameCell(_ c: Int, _ r: Int, flip: Bool = false) -> NSImage {
+        let key = "\(c),\(r)\(flip ? "F" : "")"
+        if let cached = cache[key] { return cached }
+        let sh = sheet.size.height
+        let src = NSRect(x: CGFloat(c) * 32, y: sh - CGFloat(r + 1) * 32, width: 32, height: 32)
+        let out = NSImage(size: NSSize(width: SIZE, height: SIZE))
+        out.lockFocus(); NSGraphicsContext.current?.imageInterpolation = .none
+        if flip { let t = NSAffineTransform(); t.translateX(by: SIZE, yBy: 0); t.scaleX(by: -1, yBy: 1); t.concat() }
+        sheet.draw(in: NSRect(x: 0, y: 0, width: SIZE, height: SIZE), from: src, operation: .sourceOver, fraction: 1)
+        out.unlockFocus(); cache[key] = out; return out
     }
 
     // MARK: перетаскивание
@@ -476,6 +731,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if clinging { clingStep(); return } // висит на курсоре (поймал в прыжке)
+        if leaping { leapStep(); return }   // прыгает между мониторами
 
         if st == .falling {                 // летит по параболе и мягко садится (без отскока)
             let ground = bottomY()
@@ -688,6 +944,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "fall":
             fallY = bottomY() + 240; fallVx = CGFloat.random(in: -4...4); fallVy = 0
             flySpin = 0; flyHang = true; st = .falling
+        case "leapup":   if let s = verticalNeighbor(up: true)  { launchLeap(to: s) } else { alert("Нет монитора сверху") }
+        case "leapbounce": if let s = verticalNeighbor(up: true) { launchLeap(to: s, bounce: true) } else { alert("Нет монитора сверху") }
+        case "leapdown": if let s = verticalNeighbor(up: false) { launchLeap(to: s) } else { alert("Нет монитора снизу") }
+        case "leap":     if let s = anyOtherScreen() { launchLeap(to: s) } else { alert("Других мониторов нет") }
         default: break
         }
     }
@@ -929,6 +1189,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    func screenNumber(_ s: NSScreen) -> Int {              // стабильный id монитора (переживает перезапуск)
+        (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue ?? 0
+    }
+
     func saveState() {
         let d = UserDefaults.standard
         lastSaveTS = Date().timeIntervalSince1970
@@ -937,6 +1201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         d.set(boredom, forKey: "neko.boredom")
         d.set(hunger, forKey: "neko.hunger")
         d.set(Double(x), forKey: "neko.x")
+        d.set(screenNumber(curScreen()), forKey: "neko.screen")   // на каком мониторе был — чтобы вернуться туда же
         d.set(st.label, forKey: "neko.state")              // чтобы стартовать осмысленно, а не всегда «спать»
         let arr = kibbles.filter { $0.landed }.map {
             ["x": Double($0.x), "y": Double($0.y), "eaten": $0.eaten, "max": $0.maxBites]
@@ -949,7 +1214,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             energy = min(1, max(0, d.double(forKey: "neko.energy")))
             boredom = min(1, max(0, d.double(forKey: "neko.boredom")))
             hunger = min(1, max(0, d.double(forKey: "neko.hunger")))   // старое сохранение могло быть сырым счётчиком
-            if let xx = d.object(forKey: "neko.x") as? Double {        // не дать спрятаться за краем (если ушёл гулять перед выходом)
+            // СНАЧАЛА вернуть монитор, на котором был; если его уже нет (отключили) — на текущий главный
+            if let num = d.object(forKey: "neko.screen") as? Int, num != 0,
+               let sc = NSScreen.screens.first(where: { screenNumber($0) == num }) {
+                homeScreen = sc
+            } else {
+                homeScreen = NSScreen.main
+            }
+            if let xx = d.object(forKey: "neko.x") as? Double {        // x уже относительно нужного монитора; не дать спрятаться за краем
                 x = min(max(CGFloat(xx), leftEdge()), rightEdge())
             }
             if let ts = d.object(forKey: "neko.savedAt") as? Double {  // отсыпание за время, пока приложение не работало

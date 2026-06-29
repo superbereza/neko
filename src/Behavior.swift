@@ -131,6 +131,16 @@ extension AppDelegate {
         let bedtime = hour >= 22 || hour < 7        // вечером пора укладываться спать
         let act = dayEnergy(hour)                   // циркадная активность 0..1.3 (утро бодр, обед вял, вечер второй подъём)
         if !bedtime && energy > 0.45 && Double.random(in: 0..<1) < 0.10 * act { enter(.zoomies); return }   // днём иногда внезапно «носится»
+        // изредка сам захочет «исследовать» другой монитор (~3 раза/день; активные настроения — чаще, ленивый — реже)
+        let jumpMood: Double = { switch mood { case .playful, .curious: return 1.6; case .lazy: return 0.4; default: return 1.0 } }()
+        if !bedtime && energy > 0.4 && NSScreen.screens.count > 1 && Double.random(in: 0..<1) < 0.0015 * act * jumpMood {
+            let up = Bool.random()                          // вверх или вниз (что есть)
+            if let s = verticalNeighbor(up: up) {
+                launchLeap(to: s, bounce: up && Double.random(in: 0..<1) < 0.35); return   // вверх ≈35% через отскок, вниз — спрыгивание
+            } else if let s = anyOtherScreen() {
+                launchLeap(to: s); return                   // нет соседа сверху/снизу → ближайший другой монитор (прямой)
+            }
+        }
 
         // полезности из нужд (response-кривые: «игнорить до порога, потом расти»), масштаб по времени суток
         var uSleep = ramp(1 - energy, 0.35, 0.95) * (bedtime ? 2.0 : (1.4 - act))  // спит, когда устал; вечером — сильно

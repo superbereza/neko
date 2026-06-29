@@ -3,6 +3,9 @@ import Cocoa
 final class NekoWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+    // не давать системе прижимать окно к видимой области: коту нужно свободно уезжать за верх экрана,
+    // в зазор между мониторами и за края при прыжках/уходе за кадр (иначе Y «упирается» в кромку)
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 // Кот: ловит перетаскивание
