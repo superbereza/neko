@@ -6,6 +6,7 @@ extension AppDelegate {
         st = s; stTicks = 0; hopOffset = 0
         dlog("→ \(s.label)")
         if s != .walk { returningToSleep = false }   // флаг живёт только для возвратной прогулки с улицы
+        hunting = false                               // охотничий полёт сбрасывается при любой смене состояния
         // гасим несовместимые намерения, чтобы не возникало невозможных комбинаций
         switch s {
         case .sleep, .zoomies, .hunt, .play:         // никаких миссий
@@ -188,25 +189,54 @@ extension AppDelegate {
         runState(decide: { self.utilityDecide() })
     }
 
-    // Восприятие окружения: мышь прямо НАД котом в зоне досягаемости → вертикальный подскок.
+    // Охота как НАМЕРЕНИЕ: интерес растёт от движения курсора рядом (интенсивнее машешь — сильнее),
+    // затухает сам; порог зависит от состояния (сидит — легко, гуляет — труднее, носится — занят).
     func perceive() {
-        guard mood == .playful, !bedtimeNow,          // охотится только в игривом настроении и не ночью
-              huntCool == 0, !eating, !toFood, !goingAway, !leaving,
-              st == .idle || st == .walk || st == .zoomies else { hoverTicks = 0; return }
+        guard !bedtimeNow, huntCool == 0, !eating, !toFood, !goingAway, !leaving,
+              st == .idle || st == .walk || st == .zoomies else { huntInterest = 0; return }
         let m = NSEvent.mouseLocation
-        let above = m.y - y                         // насколько мышь выше кота
-        if abs(m.x - x) < 75 && above > SIZE * 1.5 && above < 260 {   // мышь заметно ВЫШЕ кота (≥1.5 роста) — чтоб был настоящий прыжок
-            hoverTicks += 1
-            if hoverTicks >= 6 {                    // мышь зависла (~0.6с), а не пролетела
-                hoverTicks = 0
-                huntHopH = min(above, 250) - SIZE / 2   // поднять ВЕРХНЮЮ точку кота к курсору (центр на L ниже)
-                huntStartX = x
-                huntAimX = min(max(m.x, leftEdge()), rightEdge())   // прыгает В СТОРОНУ мыши
-                enter(.hunt)
-            }
-        } else {
-            hoverTicks = 0
+        let dx = m.x - x, dy = m.y - y
+        let dist = hypot(dx, dy)
+        guard dy > -10, dist < 300 else {             // курсор недосягаем/ниже кота — интерес остывает
+            huntInterest *= 0.9; if huntInterest < 0.5 { huntInterest = 0 }; return
         }
+        let prox = Double(1 - dist / 300)              // ближе курсор — сильнее тянет
+        // «нависает прямо над котом» (как дразнящая игрушка над головой) — копит интерес даже стоя на месте
+        let overhead = (dy > 15 ? 1.0 : 0.0) * Double(max(0, 1 - abs(dx) / 90)) * prox
+        let motion = Double(mouseDelta) * prox         // движение рядом тоже распаляет
+        let moodGain: Double = { switch mood {
+            case .playful: return 1.8; case .curious: return 1.2; case .lazy: return 0.5; default: return 1.0 } }()
+        // случайный быстрый пронос мимо почти не копит (затухание съедает), а зависший/елозящий над котом — копит
+        huntInterest = huntInterest * 0.95 + (overhead * 5 + motion * 0.35) * moodGain
+        huntInterest = min(huntInterest, 200)
+
+        let threshold: Double                          // насколько сильно надо «захотеть», чтобы прыгнуть
+        switch st {
+        case .idle:    threshold = 25                  // сидит/отдыхает — заводится легко
+        case .walk:    threshold = 70                  // на ходу — труднее
+        default:       threshold = .infinity           // zoomies — занят своей игрой, игнорит курсор
+        }
+        if huntInterest >= threshold {
+            if st == .walk && Double.random(in: 0..<1) < 0.35 { huntInterest = 0; return }  // на ходу иногда «передумал»
+            huntInterest = 0
+            huntAimX = min(max(m.x, leftEdge()), rightEdge())
+            huntAimY = min(m.y, bottomY() + 320)        // цель прыжка = точка курсора (с потолком по высоте)
+            huntStartX = x
+            enter(.hunt)
+        }
+    }
+
+    // запуск охотничьего прыжка баллистикой: считаем (vx,vy), чтобы попасть ПРЯМО в точку курсора
+    func launchHunt() {
+        let g: CGFloat = 6                             // та же гравитация, что и в полёте (tick: fallVy += 6)
+        let d = hypot(huntAimX - x, huntAimY - y)
+        let T = max(8, min(16, d / 16))                // время полёта в тиках (снапко, но достижимо)
+        fallVx = (huntAimX - x) / T
+        fallVy = -(((huntAimY - y) / T) + 0.5 * g * T) // вверх (в нашей конвенции fallVy>0 = вниз)
+        fallY = y
+        hunting = true; flyHang = true; flySpin = 0; flyRot = 0
+        huntCool = 14
+        st = .falling                                  // дальше — общий баллистический цикл (с ловлей курсора)
     }
 
     // Игра с клубком: если клубок есть и кот не очень устал — всегда бежит к нему
@@ -417,25 +447,11 @@ extension AppDelegate {
                 decide()                                    // днём выспался — встал сам
             }
         case .hunt:
-            if stTicks < 7 {                                // присел перед прыжком
+            if stTicks < 6 {                                // присел перед прыжком
                 img = frame("alert", 0)
-            } else if stTicks < 17 {                        // прыжок-дуга В СТОРОНУ мыши
-                let p = CGFloat(stTicks - 7) / 10
-                x = huntStartX + (huntAimX - huntStartX) * p                // летит к мыши по x
-                hopOffset = huntHopH * CGFloat(sin(Double(p) * .pi / 2))    // вверх, пик в конце дуги
-                img = frame("hang", 0)                      // поза как при висении (вытянутые лапы)
-                let m = NSEvent.mouseLocation
-                if abs(m.x - x) < 12 && (y + hopOffset + SIZE / 2) >= m.y - 6 {   // достал курсор (и по x, и по высоте)
-                    clinging = true
-                    clingPrevX = m.x; clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
-                    return                       // сразу висим — без кадра «на земле»
-                }
-            } else {                                        // не поймал — падает с верхней точки (без снапа), в позе висения
-                huntCool = 12
+            } else {                                        // прыжок: баллистика прямо в курсор (ловля/наклон — в цикле .falling)
                 boredom = max(0, boredom - 0.15)            // охота развлекает
-                fallY = y + hopOffset; fallVx = 0; fallVy = 0; flySpin = 0; flyHang = true
-                hopOffset = 0
-                st = .falling
+                launchHunt()
                 return
             }
         case .play:

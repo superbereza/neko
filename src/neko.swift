@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.17"
+let VERSION = "1.0.18"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -45,7 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var huntStartX: CGFloat = 0    // откуда прыгнул
     var huntAimX: CGFloat = 0      // куда целится (x курсора в момент прыжка)
     var huntCool = 0               // кулдаун между прыжками
-    var hoverTicks = 0             // сколько мышь висит над котом (нужно «зависание», не пролёт)
+    var hoverTicks = 0             // (устар.) ранее: зависание мыши над котом
+    var huntAimY: CGFloat = 0      // y-цель прыжка (точка курсора)
+    var huntInterest = 0.0         // накопленное «желание прыгнуть» (растёт от движения курсора рядом)
+    var hunting = false            // в полёте охотничьего прыжка: ловит курсор + наклон по траектории
     var clinging = false           // висит на курсоре
     var clingPrevX: CGFloat = 0    // прошлый x курсора (для раскачки)
     var clingAngle: CGFloat = 0    // угол маятника
@@ -336,8 +339,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cx = m.x + L * CGFloat(sin(Double(clingAngle)))
         let cy = m.y - L * CGFloat(cos(Double(clingAngle)))
 
-        // сильно раскачали → срывается и летит по параболе, закручиваясь
-        if clingTicks > 12 && abs(clingVel) > 7 {
+        // грип: первые ~1с (10 тиков) держится крепко, дальше слабеет (срывается легче)
+        let needVel: CGFloat = clingTicks < 20 ? 11 : 7
+        if clingTicks > 10 && abs(clingVel) > needVel {       // сильно раскачали → срывается и летит по параболе
             clinging = false
             x = cx; fallY = cy
             let tang = clingVel * L * dt                     // тангенциальная скорость (px/тик)
@@ -348,8 +352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             st = .falling
             return
         }
-        // подняли выше трети экрана → просто отцепился (без закрутки)
-        if clingTicks > 4 && m.y > s.frame.minY + s.frame.height / 3 {
+        // подняли выше трети экрана → отцепился (после короткой крепкой фазы)
+        if clingTicks > 12 && m.y > s.frame.minY + s.frame.height / 3 {
             clinging = false
             x = cx; fallY = cy; fallVx = 0; fallVy = 0; flySpin = 0; flyHang = true
             iv.frameCenterRotation = 0
@@ -394,9 +398,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if fallY <= ground {
                 fallY = ground
                 fallVx = 0
-                flySpin = 0; flyRot = 0; flyHang = false; iv.frameCenterRotation = 0   // приземлился — выпрямился
+                flySpin = 0; flyRot = 0; flyHang = false; hunting = false; iv.frameCenterRotation = 0   // приземлился — выпрямился
                 enter(.idle)
                 iv.image = frame("idle", 0)
+            } else if hunting {
+                let m = NSEvent.mouseLocation
+                // наклон спрайта по направлению полёта — на всей траектории (включая параболу после промаха)
+                let rot = max(-75, min(75, -CGFloat(atan2(Double(fallVx), Double(-fallVy))) * 180 / .pi))
+                iv.frameCenterRotation = rot
+                // прощающий захват: попал в ОБЛАСТЬ вокруг курсора (не пиксель-точность) → цепляется
+                if hypot(m.x - x, m.y - fallY) < SIZE * 0.6 {
+                    hunting = false; clinging = true
+                    clingPrevX = m.x; clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
+                    iv.frameCenterRotation = 0
+                    return
+                }
+                iv.image = frame("hang", 0)                  // летит к курсору — вытянутые лапы
             } else {
                 iv.image = flyHang ? frame("hang", 0)        // слетел с курсора — поза висения
                                    : frame("fall", anim / 2) // бросили — дрыгает лапками
@@ -533,7 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let m = NSEvent.mouseLocation
             huntStartX = x
             huntAimX = min(max(m.x, leftEdge()), rightEdge())
-            huntHopH = max(60, min(m.y - y, 200))
+            huntAimY = min(max(m.y, y + 40), bottomY() + 320)   // прыжок к курсору (баллистика)
             enter(.hunt)
         case "play":
             let px = min(max(x + 150, leftEdge()), rightEdge())
