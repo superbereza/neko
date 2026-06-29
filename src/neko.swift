@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.19"
+let VERSION = "1.0.20"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -48,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var hoverTicks = 0             // (устар.) ранее: зависание мыши над котом
     var huntAimY: CGFloat = 0      // y-цель прыжка (точка курсора)
     var huntInterest = 0.0         // накопленное «желание прыгнуть» (растёт от движения курсора рядом)
+    var huntSat = 0.0              // насыщение охотой: пару раз прыгнул — приелось (порог растёт), спадает со временем
     var hunting = false            // в полёте охотничьего прыжка: ловит курсор + наклон по траектории
     var clinging = false           // висит на курсоре
     var clingPrevX: CGFloat = 0    // прошлый x курсора (для раскачки)
@@ -73,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var playDir: CGFloat = 1   // в какую сторону толкнуть в этот раз (чередуется)
     var playCool = 0           // пауза после удара по мячу — не семенить вокруг, дать ему отлететь
     var returningToSleep = false  // вернулся с прогулки уставшим → лечь спать на экране
+    var comeHereSpeed: CGFloat = 0 // скорость забега с края при «Come here» (0 = обычная ходьба)
+    var huntAir = 0               // тики в охотничьем полёте (чтобы не «прилипал» к курсору мгновенно)
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни
@@ -97,6 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var engine: CatEngine = ReflexEngine()
     var engineReflexItem: NSMenuItem!, engineUtilityItem: NSMenuItem!
     var forceDebugItem: NSMenuItem!
+    var spacesItem: NSMenuItem!
+    var spacesExperiment = false   // режим Spaces, снятый из настроек на старте (см. applicationDidFinishLaunching)
     var moodItem: NSMenuItem!    // строка «Today's mood» — обновляется при смене настроения
     var lastSaveTS = Date().timeIntervalSince1970   // время последнего сейва — для отдыха «вне компа»
     var bootState: St = .idle    // в каком состоянии стартовать (восстанавливается из сейва)
@@ -131,7 +136,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         win.isOpaque = false; win.backgroundColor = .clear; win.hasShadow = false
         win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 1)
         win.ignoresMouseEvents = false   // чтобы можно было схватить кота
-        win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        // Spaces: надёжно — canJoinAllSpaces (везде, всегда с тобой); эксперимент — закреплён за десктопом (бродит)
+        spacesExperiment = UserDefaults.standard.bool(forKey: "neko.spacesExperiment")   // зафиксировать режим на старте
+        win.collectionBehavior = spacesExperiment
+            ? [.fullScreenAuxiliary, .stationary, .ignoresCycle]
+            : [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         iv.frame = NSRect(x: 0, y: 0, width: SIZE, height: SIZE)
         iv.imageScaling = .scaleNone
         iv.began = { [weak self] in self?.dragBegan() }
@@ -169,12 +178,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Дебаг-секция — ТОЛЬКО при спец-запуске (--debug / NEKO_DEBUG=1). В обычной сборке её нет.
         if debugBuild {
             menu.addItem(.separator())
-            dbgToggle = NSMenuItem(title: "Debug info", action: #selector(toggleDebug), keyEquivalent: "")
-            dbgToggle.state = debug ? .on : .off
-            menu.addItem(dbgToggle)
-            forceDebugItem = NSMenuItem(title: "Always debug on this Mac", action: #selector(toggleForceDebug), keyEquivalent: "")
-            forceDebugItem.state = UserDefaults.standard.bool(forKey: "neko.forceDebug") ? .on : .off
-            menu.addItem(forceDebugItem)
+            // тогглы — единый стиль (как Auto-update), клик НЕ закрывает меню
+            let dbgRow = MenuRowView(title: "Debug info", width: 260, hasCheck: true)
+            dbgRow.setChecked(debug)
+            dbgRow.onClick = { [weak self, weak dbgRow] in
+                guard let self else { return }
+                self.debug.toggle(); UserDefaults.standard.set(self.debug, forKey: "neko.debug")
+                for it in self.dbgItems { it.isHidden = !self.debug }
+                self.refreshDebug(); dbgRow?.setChecked(self.debug)
+            }
+            let dbgRowItem = NSMenuItem(); dbgRowItem.view = dbgRow; menu.addItem(dbgRowItem)
+
+            let forceRow = MenuRowView(title: "Always debug on this Mac", width: 260, hasCheck: true)
+            forceRow.setChecked(UserDefaults.standard.bool(forKey: "neko.forceDebug"))
+            forceRow.onClick = { [weak forceRow] in
+                let v = !UserDefaults.standard.bool(forKey: "neko.forceDebug")
+                UserDefaults.standard.set(v, forKey: "neko.forceDebug"); forceRow?.setChecked(v)
+            }
+            let forceRowItem = NSMenuItem(); forceRowItem.view = forceRow; menu.addItem(forceRowItem)
+
+            let spacesRow = MenuRowView(title: "Spaces: wander mode (restart)", width: 260, hasCheck: true)
+            spacesRow.setChecked(UserDefaults.standard.bool(forKey: "neko.spacesExperiment"))
+            spacesRow.onClick = { [weak self, weak spacesRow] in
+                guard let self else { return }
+                let v = !UserDefaults.standard.bool(forKey: "neko.spacesExperiment")
+                UserDefaults.standard.set(v, forKey: "neko.spacesExperiment"); spacesRow?.setChecked(v)
+                self.relaunchSelf()
+            }
+            let spacesRowItem = NSMenuItem(); spacesRowItem.view = spacesRow; menu.addItem(spacesRowItem)
+
             dbgState   = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             dbgEnergy  = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             dbgBoredom = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -188,12 +220,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(copyItem)
 
             menu.addItem(.separator())
-            engineReflexItem  = NSMenuItem(title: "Engine: Reflex",  action: #selector(setEngineReflex),  keyEquivalent: "")
-            engineUtilityItem = NSMenuItem(title: "Engine: Utility", action: #selector(setEngineUtility), keyEquivalent: "")
-            engineReflexItem.state  = engine.label == "reflex"  ? .on : .off
-            engineUtilityItem.state = engine.label == "utility" ? .on : .off
-            menu.addItem(engineReflexItem)
-            menu.addItem(engineUtilityItem)
+            let reflexRow = MenuRowView(title: "Engine: Reflex", width: 260, hasCheck: true)
+            let utilityRow = MenuRowView(title: "Engine: Utility", width: 260, hasCheck: true)
+            reflexRow.setChecked(engine.label == "reflex"); utilityRow.setChecked(engine.label == "utility")
+            reflexRow.onClick = { [weak self, weak reflexRow, weak utilityRow] in
+                self?.switchEngine("reflex"); reflexRow?.setChecked(true); utilityRow?.setChecked(false) }
+            utilityRow.onClick = { [weak self, weak reflexRow, weak utilityRow] in
+                self?.switchEngine("utility"); utilityRow?.setChecked(true); reflexRow?.setChecked(false) }
+            let reflexItem = NSMenuItem(); reflexItem.view = reflexRow; menu.addItem(reflexItem)
+            let utilityItem = NSMenuItem(); utilityItem.view = utilityRow; menu.addItem(utilityItem)
 
             menu.addItem(.separator())
             let forceItem = NSMenuItem(title: "Force state", action: nil, keyEquivalent: "")
@@ -214,6 +249,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        // нативные пункты (эмодзи-действия, инфо, Quit) — сдвинуть текст вправо к отступу кастомных строк
+        for it in menu.items where it.view == nil && !it.isSeparatorItem && !it.title.isEmpty {
+            it.title = "  " + it.title
+        }
         menu.delegate = self
         statusItem.menu = menu
         refreshDebug()
@@ -233,6 +272,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ноут проснулся (крышку открыли) → начислить коту отдых за время сна системы
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemDidWake),
                                                           name: NSWorkspace.didWakeNotification, object: nil)
+        // переключили рабочий стол (Space) → кот чаще «идёт за тобой» на активный десктоп
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spaceChanged),
+                                                          name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         // CSV-лог состояний раз в 5с (только в дебаге) — числовые кривые нужд для графиков
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.logStateSample() }
 
@@ -289,11 +331,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return img
     }
 
-    func bottomY() -> CGFloat { (NSScreen.main ?? NSScreen.screens[0]).frame.minY + SIZE / 2 - FOOT }
-    func leftEdge() -> CGFloat  { (NSScreen.main ?? NSScreen.screens[0]).frame.minX + SIZE / 2 }
-    func rightEdge() -> CGFloat { (NSScreen.main ?? NSScreen.screens[0]).frame.maxX - SIZE / 2 }
+    // === Экраны (мультимонитор) ===
+    var homeScreen: NSScreen?                          // на каком мониторе кот «живёт» сейчас
+    func curScreen() -> NSScreen {                     // валидируем (монитор могли отключить)
+        if let h = homeScreen, NSScreen.screens.contains(where: { $0.frame == h.frame }) { return h }
+        homeScreen = NSScreen.main; return homeScreen ?? NSScreen.screens[0]
+    }
+    func screenAt(_ p: NSPoint) -> NSScreen? { NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) } }
+    func cursorScreen() -> NSScreen? { screenAt(NSEvent.mouseLocation) }
+    func neighborScreen(left: Bool) -> NSScreen? {     // монитор РЕАЛЬНО сбоку (не сверху/снизу): по X левее/правее + пересечение по вертикали
+        let c = curScreen().frame
+        return NSScreen.screens.filter { s in
+            s.frame != c
+            && (left ? s.frame.maxX <= c.minX + 2 : s.frame.minX >= c.maxX - 2)   // его X-диапазон сбоку, без горизонтального наложения
+            && s.frame.minY < c.maxY && s.frame.maxY > c.minY                      // и есть перекрытие по вертикали (можно дойти пешком)
+        }.min(by: { abs($0.frame.midX - c.midX) < abs($1.frame.midX - c.midX) })
+    }
+    // куда уходить гулять: с уклоном «домой» (к экрану с курсором) — сильнее у домоседных настроений
+    func chooseWanderDir() -> Bool {                   // true = влево
+        let homeBias: Double = { switch mood { case .lazy, .playful: return 0.8; case .curious: return 0.3; default: return 0.55 } }()
+        if let cs = cursorScreen(), cs.frame != curScreen().frame, Double.random(in: 0..<1) < homeBias {
+            return cs.frame.midX < curScreen().frame.midX
+        }
+        return Bool.random()
+    }
+
+    func bottomY() -> CGFloat { curScreen().frame.minY + SIZE / 2 - FOOT }
+    func leftEdge() -> CGFloat  { curScreen().frame.minX + SIZE / 2 }
+    func rightEdge() -> CGFloat { curScreen().frame.maxX - SIZE / 2 }
     func randomX() -> CGFloat {
-        let s = NSScreen.main ?? NSScreen.screens[0]
+        let s = curScreen()
         return CGFloat.random(in: (s.frame.minX + SIZE)...(s.frame.maxX - SIZE))
     }
 
@@ -317,7 +384,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: перетаскивание
-    func dragBegan() { dragging = true; clinging = false; flySpin = 0; flyRot = 0; eating = false; eatingRef = nil; iv.image = frame("held", 0) }
+    func dragBegan() {
+        dragging = true; clinging = false; flySpin = 0; flyRot = 0; eating = false; eatingRef = nil
+        if spacesExperiment { win.collectionBehavior.insert(.canJoinAllSpaces) }   // в руке — следует за курсором на любой спейс
+        iv.image = frame("held", 0)
+    }
     func dragEnded() {
         dragging = false
         x = win.frame.origin.x + SIZE / 2
@@ -325,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fallVx = max(-42, min(42, iv.throwVel.x * 0.55))      // бросок по параболе (горизонталь шире)
         fallVy = -max(-28, min(28, iv.throwVel.y * 0.55))     // вертикаль скромнее — кот не улетает в космос
         flyHang = false                         // бросили рукой — барахтается лапами
+        if let sc = screenAt(NSPoint(x: x, y: fallY)) { homeScreen = sc }   // бросили на другой монитор → он там и живёт
         st = .falling                           // мягко приземлится на лапы (без отскока)
         elog("drag_end", ["vx": Double(fallVx), "vy": Double(fallVy)])
     }
@@ -333,8 +405,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     //   θ'' = −(g/L)·sinθ − (a_пивота/L)·cosθ − c·θ'   (полу-неявный Эйлер)
     // Срывается, если поднять выше нижней трети ИЛИ сильно раскачать (улетает по параболе, крутясь).
     func clingStep() {
-        let s = NSScreen.main ?? NSScreen.screens[0]
         let m = NSEvent.mouseLocation
+        let s = screenAt(m) ?? curScreen()           // экран, где сейчас курсор
         clingTicks += 1
         if hypot(m.x - clingPrevX, m.y - clingPrevY) < 2 { clingStill += 1 } else { clingStill = 0 }
         clingPrevY = m.y
@@ -407,7 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if st == .falling {                 // летит по параболе и мягко садится (без отскока)
             let ground = bottomY()
-            let top = (NSScreen.main ?? NSScreen.screens[0]).frame.maxY - SIZE / 2
+            let top = curScreen().frame.maxY - SIZE / 2
             fallVy += 6                      // гравитация (короткий реалистичный полёт)
             fallY -= fallVy
             x += fallVx                      // горизонтальный полёт
@@ -423,17 +495,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if fallY <= ground {
                 fallY = ground
                 fallVx = 0
+                if hunting { huntSat = min(1.6, huntSat + 0.15) }   // ПРОМАХ охоты: слегка приелся, но интерес остаётся → сразу попробует снова
                 flySpin = 0; flyRot = 0; flyHang = false; hunting = false; iv.frameCenterRotation = 0   // приземлился — выпрямился
+                if spacesExperiment { win.collectionBehavior.remove(.canJoinAllSpaces) }   // приземлился → снова закреплён за десктопом
                 enter(.idle)
                 iv.image = frame("idle", 0)
             } else if hunting {
+                huntAir += 1
                 let m = NSEvent.mouseLocation
                 // наклон спрайта по направлению полёта — на всей траектории (включая параболу после промаха)
                 let rot = max(-75, min(75, -CGFloat(atan2(Double(fallVx), Double(-fallVy))) * 180 / .pi))
                 iv.frameCenterRotation = rot
-                // прощающий захват: попал в ОБЛАСТЬ вокруг курсора (не пиксель-точность) → цепляется
-                if hypot(m.x - x, m.y - fallY) < SIZE * 0.6 {
+                // прощающий захват — но не раньше ~0.3с полёта, чтобы был видимый прыжок, а не «прилип» сразу
+                if huntAir >= 3, hypot(m.x - x, m.y - fallY) < SIZE * 0.6 {
                     hunting = false; clinging = true
+                    huntInterest = 0; huntSat = min(1.6, huntSat + 0.5); huntCool = 25   // ПОЙМАЛ → наигрался немного + пауза
+                    if spacesExperiment { win.collectionBehavior.insert(.canJoinAllSpaces); win.orderFrontRegardless() }
                     clingPrevX = m.x; clingPrevY = m.y; clingStill = 0
                     clingPivotV = 0; clingAngle = 0; clingVel = 0; clingTicks = 0
                     iv.frameCenterRotation = 0
@@ -441,8 +518,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 iv.image = frame("hang", 0)                  // летит к курсору — вытянутые лапы
             } else {
+                if flySpin == 0 {
+                    if flyHang {   // слетел с курсора — поза висения, носом по скорости
+                        iv.frameCenterRotation = max(-75, min(75, -CGFloat(atan2(Double(fallVx), Double(-fallVy))) * 180 / .pi))
+                    } else {       // бросили рукой — барахтается, летит ПОПОЙ по траектории (угол скорости + 90°)
+                        iv.frameCenterRotation = CGFloat(atan2(Double(-fallVy), Double(fallVx)) * 180 / .pi) + 90
+                    }
+                }
                 iv.image = flyHang ? frame("hang", 0)        // слетел с курсора — поза висения
-                                   : frame("fall", anim / 2) // бросили — дрыгает лапками
+                                   : frame("fall", anim / 2) // бросили — дрыгает лапками, попой вперёд
             }
             win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: fallY - SIZE / 2))
             anim += 1
@@ -466,15 +550,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // «Позвать котика» — вернуть на видимый экран к курсору, если он ушёл гулять/пропал (противоположность Go for a walk)
     @objc func comeHereMenu() {
         goingAway = false; leaving = false; eating = false; eatingRef = nil
-        toFood = false; toPlay = false; clinging = false
+        toFood = false; toPlay = false; clinging = false; hunting = false
         flySpin = 0; flyRot = 0; iv.frameCenterRotation = 0; hopOffset = 0
-        let m = NSEvent.mouseLocation
-        x = min(max(m.x, leftEdge()), rightEdge())   // прибегает туда, где курсор
+        homeScreen = cursorScreen() ?? homeScreen     // на ТОТ монитор, где сейчас курсор
+        let fromLeft = awayLeft                        // выбегает с той стороны, КУДА уходил в away
+        x = fromLeft ? (leftEdge() - SIZE) : (rightEdge() + SIZE)   // появляется ЗА кадром (за краем) — пока не видно
         y = bottomY()
-        win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2 + hopOffset))
-        win.orderFrontRegardless()
-        enter(.idle)
-        saveState()                                  // на всякий — зафиксировать видимую позицию
+        win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
+        bringToActiveSpace()                          // окно на нужном десктопе, но кот за кадром
+        st = .idle; stTicks = 0; iv.image = frame("idle", 0)
+        let runIn = CGFloat.random(in: 150...260)
+        let tgt = fromLeft ? min(leftEdge() + runIn, rightEdge()) : max(rightEdge() - runIn, leftEdge())
+        let spd = max(6, min(18, runIn / 30))
+        // несколько секунд за кадром — тишина, как будто бежит откуда-то, потом показывается и вбегает
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 2.0...3.5)) { [weak self] in
+            guard let self else { return }
+            self.targetX = tgt; self.comeHereSpeed = spd; self.enter(.walk)
+        }
+        saveState()
     }
 
     // MARK: - Обновления (GitHub Releases, публичный репо)
@@ -616,11 +709,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func refreshDebug() {
         guard debugBuild, debug, dbgState != nil else { return }
-        dbgState.title   = "state: \(st.label)"
-        dbgEnergy.title  = String(format: "energy: %.2f", energy)
-        dbgBoredom.title = String(format: "boredom: %.2f", boredom)
-        dbgHunger.title  = String(format: "hunger: %.2f", hunger)
-        dbgMood.title    = "mood: \(mood.label)"
+        dbgState.title   = "  state: \(st.label)"
+        dbgEnergy.title  = String(format: "  energy: %.2f", energy)
+        dbgBoredom.title = String(format: "  boredom: %.2f", boredom)
+        dbgHunger.title  = String(format: "  hunger: %.2f", hunger)
+        dbgMood.title    = "  mood: \(mood.label)"
     }
 
     // дебаг-цифры обновляются ЖИВО, пока меню открыто (таймер в .common — работает и в режиме трекинга меню)
@@ -635,6 +728,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dbgMenuTimer = t
     }
     func menuDidClose(_ menu: NSMenu) { dbgMenuTimer?.invalidate(); dbgMenuTimer = nil }
+
+    @objc func toggleSpacesExperiment() {
+        let v = !UserDefaults.standard.bool(forKey: "neko.spacesExperiment")
+        UserDefaults.standard.set(v, forKey: "neko.spacesExperiment")
+        spacesItem?.state = v ? .on : .off
+        relaunchSelf()                                 // применится сразу — авто-перезапуск (стейт сохраняется)
+    }
+
+    func relaunchSelf() {
+        saveState()                                    // чтобы кот вернулся туда же и тем же (бесшовно)
+        let path = Bundle.main.bundlePath
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 0.4; open \"\(path)\""]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
 
     @objc func toggleForceDebug() {
         let v = !UserDefaults.standard.bool(forKey: "neko.forceDebug")
@@ -791,6 +901,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         creditRest(Date().timeIntervalSince1970 - lastSaveTS)
     }
 
+    // экспериментальный «бродячий» режим Spaces — ФИКСИРУЕТСЯ НА СТАРТЕ (тоггл применяется после перезапуска),
+    // иначе живое окно перейдёт в кашу между canJoinAllSpaces и закреплением.
+
+    func bringToActiveSpace() {
+        guard spacesExperiment else { win.orderFrontRegardless(); return }   // надёжный режим: окно и так на всех спейсах
+        win.collectionBehavior.insert(.canJoinAllSpaces)                     // эксперимент: на миг «на всех», затем снять
+        win.orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, !self.clinging, !self.dragging else { return }
+            self.win.collectionBehavior.remove(.canJoinAllSpaces)
+        }
+    }
+
+    @objc func spaceChanged() {                            // ты переключил десктоп → кот чаще приходит за тобой
+        guard spacesExperiment else { return }             // надёжный режим: окно и так на всех спейсах, ничего не делаем
+        if clinging || dragging {                          // висит/держим: показать на активном
+            win.orderFrontRegardless(); elog("space_follow", ["followed": 1, "by": "cursor"]); return
+        }
+        guard !leaving, st != .away else { return }        // если он сейчас «в туннеле» (ушёл в спейс) — не вытаскиваем
+        let follow: Double = { switch mood { case .curious: return 0.55; case .lazy, .playful: return 0.9; default: return 0.8 } }()
+        if Double.random(in: 0..<1) < follow {
+            bringToActiveSpace()                           // пришёл за тобой на активный десктоп
+            elog("space_follow", ["followed": 1])
+        } else {
+            elog("space_follow", ["followed": 0])          // в этот раз остался на старом десктопе
+        }
+    }
+
     func saveState() {
         let d = UserDefaults.standard
         lastSaveTS = Date().timeIntervalSince1970
@@ -838,7 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func startWalkabout() {        // уйти гулять за стену (вызывается сам / для демо)
         guard !goingAway && !leaving, st != .away, st != .digging, st != .falling else { return }
-        goingAway = true; toFood = false; awayLeft = Bool.random()
+        goingAway = true; toFood = false; awayLeft = chooseWanderDir()
         targetX = awayLeft ? leftEdge() : rightEdge()
         enter(.walk)
     }

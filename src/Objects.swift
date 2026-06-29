@@ -162,7 +162,7 @@ final class MenuRowView: NSView {
         titleLabel.font = NSFont.menuFont(ofSize: 0)
         titleLabel.stringValue = title
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.frame = NSRect(x: 21, y: 3, width: width - 46, height: 16)
+        titleLabel.frame = NSRect(x: 21, y: 3, width: width - 46, height: 16)   // текст с жёлобом под галочку (как чек-меню)
         addSubview(titleLabel)
         if hasCheck {
             check.image = NSImage(named: NSImage.menuOnStateTemplateName)

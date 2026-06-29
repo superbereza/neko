@@ -23,7 +23,7 @@ extension AppDelegate {
         case .idle:    stDur = Int.random(in: 40...110)
         case .walk:    stDur = 0
         case .digging: stDur = Int.random(in: 30...50)      // ~3–5 c копает
-        case .away:    stDur = Int.random(in: 1800...6000)  // 3–10 мин гуляет
+        case .away:    stDur = Int.random(in: 1800...108000) // ~3 мин … 3 ч «в другом спейсе/за стеной», потом вернётся на активный десктоп
         case .falling: stDur = 0
         case .hunt:    stDur = 30
         case .play:    stDur = 8
@@ -91,7 +91,7 @@ extension AppDelegate {
             enter(.zoomies)
         case .walk:
             if Double.random(in: 0..<1) < awayChance {          // своенравно уходит за стену
-                goingAway = true; awayLeft = Bool.random()
+                goingAway = true; awayLeft = chooseWanderDir()
                 targetX = awayLeft ? leftEdge() : rightEdge()
                 enter(.walk)
             } else {
@@ -170,7 +170,7 @@ extension AppDelegate {
         case .zoomies: enter(.zoomies)
         case .walk:
             if Double.random(in: 0..<1) < awayChance {
-                goingAway = true; awayLeft = Bool.random()
+                goingAway = true; awayLeft = chooseWanderDir()
                 targetX = awayLeft ? leftEdge() : rightEdge()
                 enter(.walk)
             } else { targetX = randomX(); enter(.walk) }
@@ -195,34 +195,31 @@ extension AppDelegate {
     func perceive() {
         guard !bedtimeNow, huntCool == 0, !eating, !toFood, !goingAway, !leaving,
               st == .idle || st == .walk || st == .zoomies else { huntInterest = 0; return }
+        huntSat = max(0, huntSat - 0.004)              // насыщение от игры спадает (отдохнул — снова интересно)
         let m = NSEvent.mouseLocation
         let dx = m.x - x, dy = m.y - y
         let dist = hypot(dx, dy)
-        guard dy > -10, dist < 300 else {             // курсор недосягаем/ниже кота — интерес остывает
+        guard dy > SIZE * 0.4, dist < 300 else {      // курсор должен быть заметно ВЫШЕ кота — интерес остывает
             huntInterest *= 0.9; if huntInterest < 0.5 { huntInterest = 0 }; return
         }
-        let prox = Double(1 - dist / 300)              // ближе курсор — сильнее тянет
-        // «нависает прямо над котом» (как дразнящая игрушка над головой) — копит интерес даже стоя на месте
+        let prox = Double(1 - dist / 300)
+        // ГЛАВНОЕ — ДВИЖЕНИЕ курсора (машешь = играешь); статичное «нависание» даёт лишь чуть-чуть и само НЕ пробивает порог
         let overhead = (dy > 15 ? 1.0 : 0.0) * Double(max(0, 1 - abs(dx) / 90)) * prox
-        let motion = Double(mouseDelta) * prox         // движение рядом тоже распаляет
+        let motion = Double(mouseDelta) * prox
         let moodGain: Double = { switch mood {
             case .playful: return 1.8; case .curious: return 1.2; case .lazy: return 0.5; default: return 1.0 } }()
-        // случайный быстрый пронос мимо почти не копит (затухание съедает), а зависший/елозящий над котом — копит
-        huntInterest = huntInterest * 0.95 + (overhead * 5 + motion * 0.35) * moodGain
-        huntInterest = min(huntInterest, 200)
+        huntInterest = huntInterest * 0.92 + (overhead * 0.8 + motion * 0.55) * moodGain
+        huntInterest = min(huntInterest, 300)
 
-        let threshold: Double                          // насколько сильно надо «захотеть», чтобы прыгнуть
-        switch st {
-        case .idle:    threshold = 25                  // сидит/отдыхает — заводится легко
-        case .walk:    threshold = 70                  // на ходу — труднее
-        default:       threshold = .infinity           // zoomies — занят своей игрой, игнорит курсор
-        }
+        if st == .zoomies { huntInterest = 0; return }  // носится — занят своей игрой
+        // порог РАСТЁТ с насыщением: пару раз прыгнул — приелось, пошёл по делам; активно машешь — пробиваешь и играешь ещё
+        let threshold = ((st == .walk) ? 90.0 : 30.0) + huntSat * 90
         if huntInterest >= threshold {
             if st == .walk && Double.random(in: 0..<1) < 0.35 { huntInterest = 0; return }  // на ходу иногда «передумал»
-            elog("hunt", ["interest": huntInterest, "dist": dist])
-            huntInterest = 0
+            elog("hunt", ["interest": huntInterest, "sat": huntSat, "dist": dist])
+            // интерес НЕ обнуляем и кулдаун НЕ ставим: промахнётся — сразу попробует снова. Насыщение/кулдаун — при поимке.
             huntAimX = min(max(m.x, leftEdge()), rightEdge())
-            huntAimY = min(m.y, bottomY() + 320)        // цель прыжка = точка курсора (с потолком по высоте)
+            huntAimY = min(m.y, bottomY() + 320)
             huntStartX = x
             enter(.hunt)
         }
@@ -236,8 +233,8 @@ extension AppDelegate {
         fallVx = (huntAimX - x) / T
         fallVy = -(((huntAimY - y) / T) + 0.5 * g * T) // вверх (в нашей конвенции fallVy>0 = вниз)
         fallY = y
-        hunting = true; flyHang = true; flySpin = 0; flyRot = 0
-        huntCool = 14
+        hunting = true; flyHang = true; flySpin = 0; flyRot = 0; huntAir = 0
+        // кулдаун тут НЕ ставим — промах → сразу следующая попытка; кулдаун появится при поимке
         st = .falling                                  // дальше — общий баллистический цикл (с ловлей курсора)
     }
 
@@ -358,13 +355,27 @@ extension AppDelegate {
             }
         case .walk:
             let rushing = toFood || toPlay                       // к еде/мячу — бежит во весь опор
-            let sp: CGFloat = rushing ? FOOD_SPEED : SPEED
+            let sp: CGFloat = comeHereSpeed > 0 ? comeHereSpeed : (rushing ? FOOD_SPEED : SPEED)  // come-here: забег с края
             let tx = targetX ?? x
             let dx = tx - x
             if abs(dx) <= sp {
-                x = tx
+                x = tx; comeHereSpeed = 0
                 if leaving { leaving = false; win.orderOut(nil); enter(.away); img = frame("idle", 0) }
-                else if goingAway { enter(.digging); img = frame(awayLeft ? "digL" : "digR", 0) }
+                else if goingAway {
+                    if let nb = neighborScreen(left: awayLeft) {     // есть соседний монитор → переходим на него
+                        homeScreen = nb
+                        goingAway = false
+                        x = awayLeft ? rightEdge() : leftEdge()      // появляемся у ближней кромки соседа
+                        y = bottomY()
+                        win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
+                        win.orderFrontRegardless()
+                        targetX = randomX(); enter(.walk)
+                        img = frame(awayLeft ? "W" : "E", anim)
+                        elog("cross_screen", ["to": "\(Int(nb.frame.midX))"])
+                    } else {                                         // край ВСЕХ экранов → копает и уходит «за стену»
+                        enter(.digging); img = frame(awayLeft ? "digL" : "digR", 0)
+                    }
+                }
                 else if toPlay {
                     if let k = nearestYarn(), abs(k.y - y) < SIZE {   // мяч в пределах досягаемости по высоте
                         toPlay = false; batYarn(); enter(.play); img = frame("held", 0)
@@ -379,7 +390,7 @@ extension AppDelegate {
                 }
             } else {
                 x += dx > 0 ? sp : -sp
-                img = frame(dx > 0 ? "E" : "W", anim / (rushing ? 3 : 5))   // спокойная ходьба — лапы медленнее, бег к цели — быстрее
+                img = frame(dx > 0 ? "E" : "W", anim / ((rushing || comeHereSpeed > 0) ? 3 : 5))   // спокойная ходьба медленнее, бег к цели — быстрее
             }
         case .digging:
             img = frame(awayLeft ? "digL" : "digR", stTicks / 5)   // копает дырку
@@ -394,10 +405,11 @@ extension AppDelegate {
             let sleepy = energy < 0.25 || bedtimeNow
             if stTicks > stDur || sleepy || hunger > EAT_HUNGER {
                 goingAway = false; leaving = false
+                homeScreen = cursorScreen() ?? homeScreen              // возвращается к пользователю (его монитор)
                 x = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE   // выходит из-за края шагами
                 y = bottomY()
                 win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
-                win.orderFrontRegardless()
+                bringToActiveSpace()                                   // …и на его активный десктоп
                 toFood = false
                 returningToSleep = sleepy           // вернулся уставшим/ночью → ляжет спать на экране
                 targetX = sleepy ? (awayLeft ? leftEdge() + SIZE : rightEdge() - SIZE) : randomX()
