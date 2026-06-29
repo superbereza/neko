@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.21"
+let VERSION = "1.1.0"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -90,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var leapSpin: CGFloat = 0     // накопленный угол сальто
     var leapSpinStep: CGFloat = 0 // прирост угла сальто за тик (оборот завершается к вершине)
     var comeHereSpeed: CGFloat = 0 // скорость забега с края при «Come here» (0 = обычная ходьба)
+    weak var comeHereJumpScreen: NSScreen? // «Come here»: добежал на свой монитор → прыгнуть на этот (званый)
     var huntAir = 0               // тики в охотничьем полёте (чтобы не «прилипал» к курсору мгновенно)
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
@@ -805,10 +806,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // «Позвать котика» — вернуть на видимый экран к курсору, если он ушёл гулять/пропал (противоположность Go for a walk)
     @objc func comeHereMenu() {
+        let wasAway = (st == .away) || leaving || goingAway   // был «в туннеле» (ушёл за кадр)
+        let calledScreen = cursorScreen() ?? curScreen()      // куда зовут — монитор курсора
+        let prevScreen = curScreen()                          // где был до ухода (его домашний монитор)
         goingAway = false; leaving = false; eating = false; eatingRef = nil
         toFood = false; toPlay = false; clinging = false; hunting = false
         flySpin = 0; flyRot = 0; iv.frameCenterRotation = 0; hopOffset = 0
-        homeScreen = cursorScreen() ?? homeScreen     // на ТОТ монитор, где сейчас курсор
+        if wasAway && calledScreen.frame != prevScreen.frame {
+            // звали на ДРУГОЙ монитор: сначала выбегает на СВОЙ (где был), потом прыжком на званый
+            homeScreen = prevScreen
+            comeHereJumpScreen = calledScreen
+        } else {
+            homeScreen = calledScreen                   // обычно: появляется на мониторе курсора
+            comeHereJumpScreen = nil
+        }
         let fromLeft = awayLeft                        // выбегает с той стороны, КУДА уходил в away
         x = fromLeft ? (leftEdge() - SIZE) : (rightEdge() + SIZE)   // появляется ЗА кадром (за краем) — пока не видно
         y = bottomY()
@@ -1201,7 +1212,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         d.set(boredom, forKey: "neko.boredom")
         d.set(hunger, forKey: "neko.hunger")
         d.set(Double(x), forKey: "neko.x")
-        d.set(screenNumber(curScreen()), forKey: "neko.screen")   // на каком мониторе был — чтобы вернуться туда же
+        let cs = curScreen()
+        d.set(screenNumber(cs), forKey: "neko.screen")            // на каком мониторе был — чтобы вернуться туда же
+        d.set(Double(cs.frame.minX), forKey: "neko.screenX")      // + кадр монитора как надёжный фолбэк
+        d.set(Double(cs.frame.minY), forKey: "neko.screenY")      // (NSScreenNumber может «плыть» при перезапуске)
         d.set(st.label, forKey: "neko.state")              // чтобы стартовать осмысленно, а не всегда «спать»
         let arr = kibbles.filter { $0.landed }.map {
             ["x": Double($0.x), "y": Double($0.y), "eaten": $0.eaten, "max": $0.maxBites]
@@ -1214,9 +1228,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             energy = min(1, max(0, d.double(forKey: "neko.energy")))
             boredom = min(1, max(0, d.double(forKey: "neko.boredom")))
             hunger = min(1, max(0, d.double(forKey: "neko.hunger")))   // старое сохранение могло быть сырым счётчиком
-            // СНАЧАЛА вернуть монитор, на котором был; если его уже нет (отключили) — на текущий главный
-            if let num = d.object(forKey: "neko.screen") as? Int, num != 0,
-               let sc = NSScreen.screens.first(where: { screenNumber($0) == num }) {
+            // СНАЧАЛА вернуть монитор, на котором был: сперва по стабильному id, иначе по кадру монитора
+            // (id иногда «плывёт» при перезапуске — тогда находим тот же монитор по его координатам),
+            // и только если монитора реально нет (отключили) — на текущий главный.
+            let num = d.object(forKey: "neko.screen") as? Int
+            let sx = d.object(forKey: "neko.screenX") as? Double
+            let sy = d.object(forKey: "neko.screenY") as? Double
+            if let num, num != 0, let sc = NSScreen.screens.first(where: { screenNumber($0) == num }) {
+                homeScreen = sc
+            } else if let sx, let sy, let sc = NSScreen.screens.first(where: {
+                abs($0.frame.minX - CGFloat(sx)) < 2 && abs($0.frame.minY - CGFloat(sy)) < 2 }) {
                 homeScreen = sc
             } else {
                 homeScreen = NSScreen.main

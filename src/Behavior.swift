@@ -393,6 +393,11 @@ extension AppDelegate {
                         img = frame("alert", 0)
                     }
                 }
+                else if let js = comeHereJumpScreen {                 // прибежал на СВОЙ монитор → прыжком на званый
+                    comeHereJumpScreen = nil; comeHereSpeed = 0
+                    launchLeap(to: js)
+                    img = frame("idle", 0)                            // дальше управляет leapStep
+                }
                 else {
                     toFood = false; eatNearbyKibble()
                     if !eating && returningToSleep { returningToSleep = false; enter(.sleep); img = frame("sleep", 0) }  // пришёл с улицы спать
