@@ -416,17 +416,23 @@ extension AppDelegate {
             }
         case .away:
             img = frame("idle", 0)                  // не виден
-            // возвращается, когда нагулялся ИЛИ устал / настал отбой / проголодался — чтобы не торчать за краем
+            // возвращается, когда нагулялся ИЛИ устал/отбой ИЛИ голоден И ЕСТЬ ЧТО есть.
+            // (без еды голод не рубит прогулку — иначе вечно голодный кот вообще не гуляет)
             let sleepy = energy < 0.25 || bedtimeNow
-            if stTicks > stDur || sleepy || hunger > EAT_HUNGER {
+            let foodCall = hunger > EAT_HUNGER && foodTargetX() != nil
+            if stTicks > stDur || sleepy || foodCall {
                 goingAway = false; leaving = false
-                homeScreen = cursorScreen() ?? homeScreen              // возвращается к пользователю (его монитор)
-                x = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE   // выходит из-за края шагами
+                let prev = curScreen()                                 // ВСЕГДА возвращается на СВОЙ монитор (откуда ушёл)
+                let user = cursorScreen() ?? prev                      // где я сейчас
+                homeScreen = prev
+                x = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE   // выходит из-за края СВОЕГО монитора
                 y = bottomY()
                 win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
-                bringToActiveSpace()                                   // …и на его активный десктоп
+                bringToActiveSpace()
                 toFood = false
                 returningToSleep = sleepy           // вернулся уставшим/ночью → ляжет спать на экране
+                // если я на ДРУГОМ мониторе и кот не идёт спать → добежит к себе и прыгнет ко мне
+                comeHereJumpScreen = (!sleepy && user.frame != prev.frame) ? user : nil
                 targetX = sleepy ? (awayLeft ? leftEdge() + SIZE : rightEdge() - SIZE) : randomX()
                 enter(.walk)
             }
