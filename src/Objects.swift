@@ -143,3 +143,60 @@ final class Yarn {
         self.win = win; self.view = view; self.x = x; self.y = y
     }
 }
+
+// Нативно выглядящая строка меню (view-based), но клик НЕ закрывает меню.
+// Родная галочка слева, спиннер справа; подсветка при наведении — как в системном меню.
+final class MenuRowView: NSView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let check = NSImageView()
+    let spinner = NSProgressIndicator()
+    var onClick: (() -> Void)?
+    private var hot = false
+    private let hasCheck: Bool
+    private let baseTitle: String
+    private var grayed = false
+
+    init(title: String, width: CGFloat, hasCheck: Bool) {
+        self.hasCheck = hasCheck; self.baseTitle = title
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 22))
+        titleLabel.font = NSFont.menuFont(ofSize: 0)
+        titleLabel.stringValue = title
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.frame = NSRect(x: 21, y: 3, width: width - 46, height: 16)
+        addSubview(titleLabel)
+        if hasCheck {
+            check.image = NSImage(named: NSImage.menuOnStateTemplateName)
+            check.frame = NSRect(x: 6, y: 5, width: 12, height: 12)
+            check.isHidden = true
+            addSubview(check)
+        }
+        spinner.style = .spinning; spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false; spinner.usesThreadedAnimation = true
+        spinner.frame = NSRect(x: width - 24, y: 3, width: 16, height: 16)
+        addSubview(spinner)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setChecked(_ on: Bool) { check.isHidden = !on; check.contentTintColor = hot ? .selectedMenuItemTextColor : .labelColor }
+    func setStatus(_ s: String) { grayed = true; titleLabel.stringValue = s; recolor() }
+    func reset() { grayed = false; titleLabel.stringValue = baseTitle; spinner.stopAnimation(nil); recolor() }
+
+    private func recolor() {
+        if grayed { titleLabel.textColor = hot ? .selectedMenuItemTextColor : .secondaryLabelColor }
+        else      { titleLabel.textColor = hot ? .selectedMenuItemTextColor : .labelColor }
+        if hasCheck { check.contentTintColor = hot ? .selectedMenuItemTextColor : .labelColor }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with e: NSEvent) { hot = true; recolor(); needsDisplay = true }
+    override func mouseExited(with e: NSEvent)  { hot = false; recolor(); needsDisplay = true }
+    override func mouseUp(with e: NSEvent)      { if bounds.contains(convert(e.locationInWindow, from: nil)) { onClick?() } }
+    override func draw(_ r: NSRect) {
+        if hot { NSColor.selectedContentBackgroundColor.setFill(); bounds.fill() }
+        super.draw(r)
+    }
+}

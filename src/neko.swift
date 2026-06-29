@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.16"
+let VERSION = "1.0.17"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var engineReflexItem: NSMenuItem!, engineUtilityItem: NSMenuItem!
     var forceDebugItem: NSMenuItem!
     var dbgMenuTimer: Timer?     // live-обновление цифр, пока меню открыто
+    var checkRow: MenuRowView!, autoRow: MenuRowView!   // нативные строки апдейта (меню не закрывают)
 
     let sets: [String: [(Int, Int)]] = [
         "idle":    [(3, 3)],
@@ -142,17 +143,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = makeCatIcon()
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Pour kibble (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Clear food", action: #selector(clearFoodMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Toss a yarn ball", action: #selector(tossYarnMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Remove yarn ball", action: #selector(removeYarnMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Go for a walk", action: #selector(walkMenu), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Come here!", action: #selector(comeHereMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🍚 Pour kibble (⌃⌥⌘X)", action: #selector(feedMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🧹 Clear food", action: #selector(clearFoodMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🧶 Toss a yarn ball", action: #selector(tossYarnMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🚫 Remove yarn ball", action: #selector(removeYarnMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🐾 Go for a walk", action: #selector(walkMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🔔 Come here!", action: #selector(comeHereMenu), keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Check for updates", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
-        let autoItem = NSMenuItem(title: "Auto-update", action: #selector(toggleAutoUpdate), keyEquivalent: "")
-        autoItem.state = autoUpdate ? .on : .off
-        menu.addItem(autoItem)
+        menu.addItem(makeCheckUpdatesItem())   // кнопка + спиннер + статус, меню не закрывается
+        menu.addItem(makeAutoUpdateItem())     // чекбокс, меню не закрывается
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "About Neko", action: #selector(aboutMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Today's mood: \(mood.label)", action: nil, keyEquivalent: ""))  // приятная строка для всех
@@ -446,6 +445,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func checkUpdatesMenu() { checkForUpdates(manual: true) }
 
+    // «Check for updates»: нативная строка, клик не закрывает меню — сама строка превращается в серый статус + спиннер
+    func makeCheckUpdatesItem() -> NSMenuItem {
+        let row = MenuRowView(title: "Check for updates", width: 260, hasCheck: false)
+        checkRow = row
+        row.onClick = { [weak self, weak row] in
+            guard let self, let row else { return }
+            row.spinner.startAnimation(nil)
+            row.setStatus("Checking…")
+            self.checkForUpdates(manual: true) { msg, done in
+                row.setStatus(msg)
+                if done { row.spinner.stopAnimation(nil) }
+            }
+        }
+        let item = NSMenuItem(); item.view = row
+        return item
+    }
+
+    // «Auto-update»: нативная галочка (✓ появляется/исчезает), клик не закрывает меню
+    func makeAutoUpdateItem() -> NSMenuItem {
+        let row = MenuRowView(title: "Auto-update", width: 260, hasCheck: true)
+        autoRow = row
+        row.setChecked(autoUpdate)
+        row.onClick = { [weak self, weak row] in
+            guard let self else { return }
+            self.autoUpdate.toggle()
+            row?.setChecked(self.autoUpdate)
+        }
+        let item = NSMenuItem(); item.view = row
+        return item
+    }
+
     @objc func aboutMenu() {
         let a = NSAlert()
         a.messageText = "Neko \(VERSION)"
@@ -544,6 +574,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // дебаг-цифры обновляются ЖИВО, пока меню открыто (таймер в .common — работает и в режиме трекинга меню)
     func menuWillOpen(_ menu: NSMenu) {
         refreshDebug()
+        checkRow?.reset()                       // сбросить статус «Check for updates» при открытии
+        autoRow?.setChecked(autoUpdate)         // галочка в актуальном состоянии
         dbgMenuTimer?.invalidate()
         guard debugBuild, debug else { return }
         let t = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in self?.refreshDebug() }
@@ -570,7 +602,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else { try? line.write(toFile: path, atomically: false, encoding: .utf8) }
     }
 
-    func checkForUpdates(manual: Bool = false) {
+    // report(message, done): если задан — статус идёт в меню (спиннер/текст), без модальных алертов
+    func checkForUpdates(manual: Bool = false, report: ((String, Bool) -> Void)? = nil) {
+        func say(_ m: String, done: Bool) {
+            DispatchQueue.main.async {
+                if let report { report(m, done) } else if manual { self.alert(m) }
+            }
+        }
         let url = URL(string: "https://api.github.com/repos/\(REPO)/releases/latest")!
         var req = URLRequest(url: url)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -579,14 +617,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String else {
-                if manual { DispatchQueue.main.async { self.alert("Couldn't check for updates") } }
-                return
+                say("Couldn't check", done: true); return
             }
             let assets = json["assets"] as? [[String: Any]] ?? []
             let zip = assets.compactMap { $0["browser_download_url"] as? String }.first { $0.hasSuffix(".zip") }
-            DispatchQueue.main.async {
-                if self.isNewer(tag), let zip = zip {
-                    if self.autoUpdate {
+            if self.isNewer(tag), let zip = zip {
+                say("Updating to \(tag)…", done: false)
+                DispatchQueue.main.async {
+                    if self.autoUpdate || report != nil {   // авто-апдейт ИЛИ ручная проверка из меню → ставим сразу
                         self.installUpdate(zip)
                     } else {
                         let a = NSAlert()
@@ -595,9 +633,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         a.addButton(withTitle: "Update"); a.addButton(withTitle: "Later")
                         if a.runModal() == .alertFirstButtonReturn { self.installUpdate(zip) }
                     }
-                } else if manual {
-                    self.alert("You're on the latest version (\(VERSION))")
                 }
+            } else {
+                say("Latest version (\(VERSION))", done: true)
             }
         }.resume()
     }

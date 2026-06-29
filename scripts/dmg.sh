@@ -38,4 +38,7 @@ create-dmg \
   --app-drop-link 450 215 \
   --no-internet-enable \
   dist/Neko.dmg "$STAGE" >/dev/null
+# create-dmg монтирует/открывает том «Neko» для применения layout — отмонтируем и закроем окно, чтобы не висело
+hdiutil detach "/Volumes/Neko" >/dev/null 2>&1 || true
+osascript -e 'tell application "Finder" to close (every window whose name is "Neko")' >/dev/null 2>&1 || true
 echo "Готово: $ROOT/dist/Neko.dmg"
