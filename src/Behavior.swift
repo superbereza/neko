@@ -4,6 +4,8 @@ import Cocoa
 extension AppDelegate {
     func enter(_ s: St) {
         st = s; stTicks = 0; hopOffset = 0
+        dlog("→ \(s.label)")
+        if s != .walk { returningToSleep = false }   // флаг живёт только для возвратной прогулки с улицы
         // гасим несовместимые намерения, чтобы не возникало невозможных комбинаций
         switch s {
         case .sleep, .zoomies, .hunt, .play:         // никаких миссий
@@ -338,7 +340,11 @@ extension AppDelegate {
                         img = frame("alert", 0)
                     }
                 }
-                else { toFood = false; eatNearbyKibble(); enter(.idle); img = frame("idle", 0) }
+                else {
+                    toFood = false; eatNearbyKibble()
+                    if !eating && returningToSleep { returningToSleep = false; enter(.sleep); img = frame("sleep", 0) }  // пришёл с улицы спать
+                    else { enter(.idle); img = frame("idle", 0) }
+                }
             } else {
                 x += dx > 0 ? sp : -sp
                 img = frame(dx > 0 ? "E" : "W", anim / (rushing ? 3 : 5))   // спокойная ходьба — лапы медленнее, бег к цели — быстрее
@@ -352,13 +358,18 @@ extension AppDelegate {
             }
         case .away:
             img = frame("idle", 0)                  // не виден
-            if stTicks > stDur {                    // возвращается из-за края шагами
+            // возвращается, когда нагулялся ИЛИ устал / настал отбой / проголодался — чтобы не торчать за краем
+            let sleepy = energy < 0.25 || bedtimeNow
+            if stTicks > stDur || sleepy || hunger > EAT_HUNGER {
                 goingAway = false; leaving = false
-                x = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE
+                x = awayLeft ? leftEdge() - SIZE : rightEdge() + SIZE   // выходит из-за края шагами
                 y = bottomY()
                 win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2))
                 win.orderFrontRegardless()
-                targetX = randomX(); toFood = false; enter(.walk)
+                toFood = false
+                returningToSleep = sleepy           // вернулся уставшим/ночью → ляжет спать на экране
+                targetX = sleepy ? (awayLeft ? leftEdge() + SIZE : rightEdge() - SIZE) : randomX()
+                enter(.walk)
             }
         case .idle:
             if eating {

@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.0.15"
+let VERSION = "1.0.16"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var playTired = false      // наигрался — отдыхает, пока интерес не восстановится (гистерезис)
     var playDir: CGFloat = 1   // в какую сторону толкнуть в этот раз (чередуется)
     var playCool = 0           // пауза после удара по мячу — не семенить вокруг, дать ему отлететь
+    var returningToSleep = false  // вернулся с прогулки уставшим → лечь спать на экране
     var eatingRef: Kibble?     // что грызёт сейчас
     var biteTick = 0           // тики до следующего укуса
     let ZOOM: CGFloat = 13     // скорость беготни
@@ -82,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // дебаг доступен только при спец-запуске: open Neko.app --args --debug  /  NEKO_DEBUG=1
     let debugBuild = CommandLine.arguments.contains("--debug")
         || ProcessInfo.processInfo.environment["NEKO_DEBUG"] == "1"
+        || UserDefaults.standard.bool(forKey: "neko.forceDebug")   // запомненный дебаг на этом маке
     var debug = UserDefaults.standard.bool(forKey: "neko.debug")  // показывать ли строки (внутри дебаг-секции)
     var dbgToggle: NSMenuItem!
     var dbgItems: [NSMenuItem] = []
@@ -89,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var dbgHunger: NSMenuItem!, dbgMood: NSMenuItem!
     var engine: CatEngine = ReflexEngine()
     var engineReflexItem: NSMenuItem!, engineUtilityItem: NSMenuItem!
+    var forceDebugItem: NSMenuItem!
+    var dbgMenuTimer: Timer?     // live-обновление цифр, пока меню открыто
 
     let sets: [String: [(Int, Int)]] = [
         "idle":    [(3, 3)],
@@ -143,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Toss a yarn ball", action: #selector(tossYarnMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Remove yarn ball", action: #selector(removeYarnMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Go for a walk", action: #selector(walkMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Come here!", action: #selector(comeHereMenu), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Check for updates", action: #selector(checkUpdatesMenu), keyEquivalent: ""))
         let autoItem = NSMenuItem(title: "Auto-update", action: #selector(toggleAutoUpdate), keyEquivalent: "")
@@ -159,6 +164,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             dbgToggle = NSMenuItem(title: "Debug info", action: #selector(toggleDebug), keyEquivalent: "")
             dbgToggle.state = debug ? .on : .off
             menu.addItem(dbgToggle)
+            forceDebugItem = NSMenuItem(title: "Always debug on this Mac", action: #selector(toggleForceDebug), keyEquivalent: "")
+            forceDebugItem.state = UserDefaults.standard.bool(forKey: "neko.forceDebug") ? .on : .off
+            menu.addItem(forceDebugItem)
             dbgState   = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             dbgEnergy  = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             dbgBoredom = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -404,6 +412,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func walkMenu() { startWalkabout() }
 
+    // «Позвать котика» — вернуть на видимый экран к курсору, если он ушёл гулять/пропал (противоположность Go for a walk)
+    @objc func comeHereMenu() {
+        goingAway = false; leaving = false; eating = false; eatingRef = nil
+        toFood = false; toPlay = false; clinging = false
+        flySpin = 0; flyRot = 0; iv.frameCenterRotation = 0; hopOffset = 0
+        let m = NSEvent.mouseLocation
+        x = min(max(m.x, leftEdge()), rightEdge())   // прибегает туда, где курсор
+        y = bottomY()
+        win.setFrameOrigin(NSPoint(x: x - SIZE / 2, y: y - SIZE / 2 + hopOffset))
+        win.orderFrontRegardless()
+        enter(.idle)
+        saveState()                                  // на всякий — зафиксировать видимую позицию
+    }
+
     // MARK: - Обновления (GitHub Releases, публичный репо)
     var autoUpdate: Bool {
         get { (UserDefaults.standard.object(forKey: "neko.autoUpdate") as? Bool) ?? true }
@@ -519,8 +541,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dbgMood.title    = "mood: \(mood.label)"
     }
 
-    // обновляем дебаг-цифры в момент открытия меню
-    func menuWillOpen(_ menu: NSMenu) { refreshDebug() }
+    // дебаг-цифры обновляются ЖИВО, пока меню открыто (таймер в .common — работает и в режиме трекинга меню)
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshDebug()
+        dbgMenuTimer?.invalidate()
+        guard debugBuild, debug else { return }
+        let t = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in self?.refreshDebug() }
+        RunLoop.main.add(t, forMode: .common)
+        dbgMenuTimer = t
+    }
+    func menuDidClose(_ menu: NSMenu) { dbgMenuTimer?.invalidate(); dbgMenuTimer = nil }
+
+    @objc func toggleForceDebug() {
+        let v = !UserDefaults.standard.bool(forKey: "neko.forceDebug")
+        UserDefaults.standard.set(v, forKey: "neko.forceDebug")
+        forceDebugItem?.state = v ? .on : .off
+        // действует со следующего запуска (дебаг-секция вычисляется на старте); сейчас уже в дебаге
+    }
+
+    // лог поведения в дебаг-режиме → /tmp/neko_debug.log (чтобы потом видеть «что было с котом»)
+    func dlog(_ msg: String) {
+        guard debugBuild, debug else { return }
+        let line = String(format: "%@  [%@] e=%.2f b=%.2f h=%.2f x=%d  %@\n",
+                          "\(Date())", st.label, energy, boredom, hunger, Int(x), msg)
+        let path = "/tmp/neko_debug.log"
+        if let h = FileHandle(forWritingAtPath: path) {
+            h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+        } else { try? line.write(toFile: path, atomically: false, encoding: .utf8) }
+    }
 
     func checkForUpdates(manual: Bool = false) {
         let url = URL(string: "https://api.github.com/repos/\(REPO)/releases/latest")!
@@ -616,7 +664,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             energy = min(1, max(0, d.double(forKey: "neko.energy")))
             boredom = min(1, max(0, d.double(forKey: "neko.boredom")))
             hunger = min(1, max(0, d.double(forKey: "neko.hunger")))   // старое сохранение могло быть сырым счётчиком
-            if let xx = d.object(forKey: "neko.x") as? Double { x = CGFloat(xx) }
+            if let xx = d.object(forKey: "neko.x") as? Double {        // не дать спрятаться за краем (если ушёл гулять перед выходом)
+                x = min(max(CGFloat(xx), leftEdge()), rightEdge())
+            }
         }
         if let arr = d.array(forKey: "neko.kibbles") as? [[String: Any]] {
             for k in arr {
