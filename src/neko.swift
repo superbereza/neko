@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.1.1"
+let VERSION = "1.1.2"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -254,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 ("Sleep", "sleep"), ("Idle", "idle"), ("Walk", "walk"),
                 ("Zoomies", "zoomies"), ("Walkabout (away)", "away"), ("Dig", "dig"),
                 ("Hunt cursor", "hunt"), ("Play (spawn yarn)", "play"), ("Fall", "fall"),
+                ("Eat (reset hunger)", "eat"),
                 ("Leap ↑ monitor", "leapup"), ("Leap ↑ w/ wall bounce", "leapbounce"),
                 ("Leap ↓ monitor", "leapdown"), ("Leap → other monitor", "leap"),
             ]
@@ -955,6 +956,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "fall":
             fallY = bottomY() + 240; fallVx = CGFloat.random(in: -4...4); fallVy = 0
             flySpin = 0; flyHang = true; st = .falling
+        case "eat":
+            hunger = 0                                   // поел — голод в ноль (просто, для теста)
+            if let c = foodTargetX() { toFood = true; toPlay = false; targetX = c; enter(.walk) }  // если есть корм — дойдёт и погрызёт
+            else { alert("Нет корма — сначала насыпь (🍚)") }
         case "leapup":   if let s = verticalNeighbor(up: true)  { launchLeap(to: s) } else { alert("Нет монитора сверху") }
         case "leapbounce": if let s = verticalNeighbor(up: true) { launchLeap(to: s, bounce: true) } else { alert("Нет монитора сверху") }
         case "leapdown": if let s = verticalNeighbor(up: false) { launchLeap(to: s) } else { alert("Нет монитора снизу") }
@@ -1365,7 +1370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func updateYarn() { for k in yarns where !k.dragging { stepYarn(k) } }
 
     func stepYarn(_ k: Yarn) {
-        let s = NSScreen.main ?? NSScreen.screens[0]
+        let s = screenAt(NSPoint(x: k.x, y: k.y)) ?? NSScreen.main ?? NSScreen.screens[0]   // пол/стены того монитора, где клубок
         let g = s.frame.minY + YSIZE / 2
         k.vy -= 2.0                          // гравитация
         k.x += k.vx; k.y += k.vy
@@ -1392,8 +1397,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // высыпать один катышек из позиции курсора (падает на пол)
     func dropKibble() {
         if kibbles.count >= 80 { return }   // лимит, чтобы не наплодить окон
-        let s = NSScreen.main ?? NSScreen.screens[0]
         let m = NSEvent.mouseLocation
+        let s = screenAt(m) ?? NSScreen.main ?? NSScreen.screens[0]   // на тот монитор, где курсор
         let cx = min(max(m.x, s.frame.minX + 8), s.frame.maxX - 8)
         makeKibble(x: cx, y: m.y - 7, maxBites: Int.random(in: 3...4))
         elog("feed", ["x": Double(cx), "kibbles": kibbles.count])
@@ -1435,12 +1440,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // гравитация: падают до пола
     func updateKibbles() {
-        let s = NSScreen.main ?? NSScreen.screens[0]
-        let base = s.frame.minY
         let G: CGFloat = 2.2
+        func kscr(_ k: Kibble) -> NSScreen { screenAt(NSPoint(x: k.x, y: k.y)) ?? NSScreen.main ?? NSScreen.screens[0] }
         // устойчивость: приподнятый катышек держится только если подпёрт С ОБЕИХ сторон (ямка),
         // иначе осыпается — в т.ч. прямо когда вытаскиваешь нижний
-        for k in kibbles where k.landed && !k.dragging && k.y > base + 1 {
+        for k in kibbles where k.landed && !k.dragging {
+            let base = kscr(k).frame.minY                  // пол МОНИТОРА этого катышка (а не основного)
+            guard k.y > base + 1 else { continue }
             let below = kibbles.filter { $0 !== k && $0.landed && !$0.dragging && abs($0.x - k.x) < 11 && abs($0.y + 8 - k.y) < 5 }
             let hasLeft  = below.contains { $0.x < k.x - 2 }
             let hasRight = below.contains { $0.x > k.x + 2 }
@@ -1448,6 +1454,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         var remove: [Kibble] = []
         for k in kibbles where !k.landed && !k.dragging {
+            let s = kscr(k)               // монитор, над которым катышек сейчас
+            let base = s.frame.minY
             k.vy -= G                     // гравитация
             k.vx *= 0.99                  // воздух
             k.x += k.vx
