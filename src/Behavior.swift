@@ -71,7 +71,7 @@ extension AppDelegate {
         case .playful: wZoom *= 2.2; wWalk *= 1.4; wSleep *= 0.7
         case .lazy:    wSleep *= 1.7; wWalk *= 0.6; wZoom *= 0.4
         case .curious: wWalk *= 1.8; wIdle *= 0.7
-        case .hungry:  wZoom *= 1.5; wWalk *= 1.2
+        case .restless: wZoom *= 1.5; wWalk *= 1.2   // беспокойный день — суетливее
         case .normal:  break
         }
 
@@ -152,7 +152,7 @@ extension AppDelegate {
         case .playful: uZoom *= 1.8; uWalk *= 1.3; uSleep *= 0.8
         case .lazy:    uSleep *= 1.6; uWalk *= 0.7; uZoom *= 0.4
         case .curious: uWalk *= 1.6; uIdle *= 0.7
-        case .hungry:  uZoom *= 1.3; uWalk *= 1.2
+        case .restless: uZoom *= 1.3; uWalk *= 1.2   // беспокойный день — суетливее
         case .normal:  break
         }
 
@@ -303,7 +303,7 @@ extension AppDelegate {
         mouseDelta = hypot(mm.x - lastMouseX, mm.y - lastMouseY)
         lastMouseX = mm.x; lastMouseY = mm.y
         if playCool > 0 { playCool -= 1 }                    // пауза после удара по мячу
-        hunger = min(1, hunger + HUNGER_RATE * (mood == .hungry ? 2 : 1))  // голод растёт медленно (~8 ч)
+        hunger = min(1, hunger + HUNGER_RATE)   // голод растёт медленно (~8 ч), без привязки к настроению
         playSat = max(0, playSat - 0.0006)   // интерес к клубку восстанавливается медленно (дольше отдыхает)
         if playSat <= 0.35 { playTired = false }   // отдохнул — снова можно играть (гистерезис)
 

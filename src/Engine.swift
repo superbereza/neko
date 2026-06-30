@@ -17,11 +17,11 @@ enum St { case sleep, idle, walk, digging, away, falling, zoomies, hunt, play
 }
 
 enum Mood: String, CaseIterable {
-    case playful, lazy, curious, hungry, normal
+    case playful, lazy, curious, restless, normal
     var label: String {
         switch self {
         case .playful: return "Playful"; case .lazy: return "Lazy"
-        case .curious: return "Curious"; case .hungry: return "Hungry"; case .normal: return "Normal"
+        case .curious: return "Curious"; case .restless: return "Restless"; case .normal: return "Normal"
         }
     }
 }
