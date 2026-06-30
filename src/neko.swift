@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.1.2"
+let VERSION = "1.1.3"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -1441,7 +1441,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // гравитация: падают до пола
     func updateKibbles() {
         let G: CGFloat = 2.2
-        func kscr(_ k: Kibble) -> NSScreen { screenAt(NSPoint(x: k.x, y: k.y)) ?? NSScreen.main ?? NSScreen.screens[0] }
+        // монитор катышка берём по ЦЕНТРУ (k.y — низ окна, на самом полу = на границе двух экранов → screenAt мигал бы)
+        func kscr(_ k: Kibble) -> NSScreen { screenAt(NSPoint(x: k.x, y: k.y + 7)) ?? NSScreen.main ?? NSScreen.screens[0] }
         // устойчивость: приподнятый катышек держится только если подпёрт С ОБЕИХ сторон (ямка),
         // иначе осыпается — в т.ч. прямо когда вытаскиваешь нижний
         for k in kibbles where k.landed && !k.dragging {
