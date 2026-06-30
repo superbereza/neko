@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.1.3"
+let VERSION = "1.1.4"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -1500,10 +1500,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for k in remove { k.win.orderOut(nil); kibbles.removeAll { $0 === k } }
     }
 
+    // катышек на ТОМ ЖЕ мониторе, что и кот (для вертикально-составленных экранов X совпадает, а монитор — нет)
+    func kibbleOnMyScreen(_ k: Kibble) -> Bool {
+        screenAt(NSPoint(x: k.x, y: k.y + 7))?.frame == curScreen().frame
+    }
     // съесть катышек рядом с котом (в точке остановки)
     func eatNearbyKibble() {
-        // начинает грызть верхний катышек кучки (с максимальным y)
-        let inRange = kibbles.filter { $0.landed && abs($0.x - x) <= SIZE / 2 }
+        // начинает грызть верхний катышек кучки (с максимальным y) — только на своём мониторе
+        let inRange = kibbles.filter { $0.landed && kibbleOnMyScreen($0) && abs($0.x - x) <= SIZE / 2 }
         if let top = inRange.max(by: { $0.y < $1.y }) {
             eatingRef = top
             biteTick = 0

@@ -35,7 +35,7 @@ extension AppDelegate {
     // центр БЛИЖАЙШЕЙ кучки: внутри кучи усредняем (встаёт по центру),
     // но между раздельными кучами не садится — идёт к ближайшей
     func foodTargetX() -> CGFloat? {
-        let xs = kibbles.filter { $0.landed && !$0.dragging }.map { $0.x }.sorted()
+        let xs = kibbles.filter { $0.landed && !$0.dragging && kibbleOnMyScreen($0) }.map { $0.x }.sorted()
         guard !xs.isEmpty else { return nil }
         var clusters: [[CGFloat]] = [[xs[0]]]
         for v in xs.dropFirst() {
@@ -438,7 +438,7 @@ extension AppDelegate {
             }
         case .idle:
             if eating {
-                if let k = eatingRef, k.landed, !k.dragging, abs(k.x - x) <= SIZE / 2 {   // лежит рядом, не схвачен
+                if let k = eatingRef, k.landed, !k.dragging, kibbleOnMyScreen(k), abs(k.x - x) <= SIZE / 2 {   // рядом, не схвачен, на моём мониторе
                     img = frame("eat", 0)
                     biteTick += 1
                     if biteTick >= 16 {             // очередной укус
