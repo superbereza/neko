@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.1.5"
+let VERSION = "1.1.6"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -802,7 +802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var m = all.randomElement() ?? mood
         if all.count > 1 { while m == mood { m = all.randomElement() ?? m } }   // не то же самое подряд
         mood = m
-        moodItem?.title = "Today's mood: \(mood.label)"
+        moodItem?.title = "  Today's mood: \(mood.label)"   // "  " — тот же отступ, что у остальных пунктов (иначе строка «уезжает»)
     }
 
     // «Позвать котика» — вернуть на видимый экран к курсору, если он ушёл гулять/пропал (противоположность Go for a walk)

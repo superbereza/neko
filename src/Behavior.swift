@@ -76,6 +76,7 @@ extension AppDelegate {
         }
 
         if bedtime { wSleep += 3; wWalk *= 0.3; wZoom *= 0.05; wIdle *= 0.4 }   // вечер/ночь — в сон
+        if energy < 0.2 { wSleep = max(wSleep, 2.5); wZoom = 0; wWalk *= 0.3 }   // истощён — отсыпается даже в активные часы
 
         let weights: [(St, Double)] = [(.sleep, wSleep), (.walk, wWalk), (.zoomies, wZoom), (.idle, wIdle)]
         let total = weights.reduce(0) { $0 + max(0, $1.1) }
@@ -165,6 +166,7 @@ extension AppDelegate {
         }
 
         if bedtime { uSleep += 2.5; uWalk *= 0.3; uZoom *= 0.05; uIdle *= 0.4 }   // вечер/ночь — сильно тянет в сон
+        if energy < 0.2 { uSleep = max(uSleep, 2.5); uZoom = 0; uWalk *= 0.3 }    // истощён — отсыпается даже в активные часы (иначе застревает на e≈0)
 
         let weights: [(St, Double)] = [(.sleep, uSleep), (.walk, uWalk), (.zoomies, uZoom), (.idle, uIdle)]
         let total = weights.reduce(0) { $0 + max(0, $1.1) }
@@ -203,8 +205,8 @@ extension AppDelegate {
     // Охота как НАМЕРЕНИЕ: интерес растёт от движения курсора рядом (интенсивнее машешь — сильнее),
     // затухает сам; порог зависит от состояния (сидит — легко, гуляет — труднее, носится — занят).
     func perceive() {
-        guard !bedtimeNow, huntCool == 0, !eating, !toFood, !goingAway, !leaving,
-              st == .idle || st == .walk || st == .zoomies else { huntInterest = 0; return }
+        guard !bedtimeNow, huntCool == 0, !eating, !toFood, !goingAway, !leaving, energy > 0.2,
+              st == .idle || st == .walk || st == .zoomies else { huntInterest = 0; return }   // выдохся (e≤0.2) — не гоняется, копит силы
         huntSat = max(0, huntSat - 0.004)              // насыщение от игры спадает (отдохнул — снова интересно)
         let m = NSEvent.mouseLocation
         let dx = m.x - x, dy = m.y - y
