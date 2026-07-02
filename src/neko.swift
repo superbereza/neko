@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.1.7"
+let VERSION = "1.1.8"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -1032,23 +1032,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // действует со следующего запуска (дебаг-секция вычисляется на старте); сейчас уже в дебаге
     }
 
-    // CSV-лог реальных состояний (раз в 10с) → ~/Library/Logs/neko-state.csv для аналитики модели нужд
+    // CSV-лог реальных состояний (раз в 5с) → ~/Library/Logs/neko-state.csv для аналитики модели нужд.
+    // mouseDist — расстояние курсор↔кот бакетами по 50px (потолок 2000), mouseActive — был ли инпут
+    // за последние 5с (CGEventSource, без разрешений). Это трейс входов мира для реплея в симуляции.
     func logStateSample() {
         guard debugBuild else { return }
         let fm = FileManager.default
         let path = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/neko-state.csv")
-        let header = "epoch,time,state,energy,boredom,hunger,mood,x\n"
+        let header = "epoch,time,state,energy,boredom,hunger,mood,x,mouseDist,mouseActive\n"
         // ротация по размеру: > 15 МБ → в .csv.1 (одна резервная). Итого ≤ ~30 МБ.
         if let sz = (try? fm.attributesOfItem(atPath: path)[.size]) as? Int, sz > 15_000_000 {
             let bak = path + ".1"; try? fm.removeItem(atPath: bak); try? fm.moveItem(atPath: path, toPath: bak)
         }
+        // смена схемы колонок: файл со старым заголовком уводим в .csv.1 и начинаем новый
+        if let fh = FileHandle(forReadingAtPath: path) {
+            let first = String(data: fh.readData(ofLength: header.utf8.count), encoding: .utf8)
+            try? fh.close()
+            if first != header {
+                let bak = path + ".1"; try? fm.removeItem(atPath: bak); try? fm.moveItem(atPath: path, toPath: bak)
+            }
+        }
         if !fm.fileExists(atPath: path) {
             try? header.write(toFile: path, atomically: true, encoding: .utf8)
         }
+        let m = NSEvent.mouseLocation
+        let mouseDist = min(2000, Int(hypot(m.x - x, m.y - y) / 50) * 50)
+        let inputTypes: [CGEventType] = [.mouseMoved, .leftMouseDragged, .leftMouseDown,
+                                         .rightMouseDown, .scrollWheel, .keyDown]
+        let idleSec = inputTypes.map {
+            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0)
+        }.min() ?? .infinity
+        let mouseActive = idleSec < 5 ? 1 : 0
         let now = Date()
-        let row = String(format: "%.0f,%@,%@,%.3f,%.3f,%.3f,%@,%d\n",
+        let row = String(format: "%.0f,%@,%@,%.3f,%.3f,%.3f,%@,%d,%d,%d\n",
                          now.timeIntervalSince1970, ISO8601DateFormatter().string(from: now),
-                         st.label, energy, boredom, hunger, mood.label, Int(x))
+                         st.label, energy, boredom, hunger, mood.label, Int(x), mouseDist, mouseActive)
         if let h = FileHandle(forWritingAtPath: path) { h.seekToEndOfFile(); h.write(Data(row.utf8)); try? h.close() }
     }
 
