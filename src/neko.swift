@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 // Спокойный oneko: живёт на нижней кромке, много спит, изредка мягко гуляет.
 // Корм по ⌃⌥⌘X — у курсора насыпается горка; кот придёт есть, когда сам проснётся.
 // Кота можно перетащить мышью.
-let VERSION = "1.1.6"
+let VERSION = "1.1.7"
 let REPO = "superbereza/neko"
 let CELL = 32
 let SCALE: CGFloat = 2
@@ -670,12 +670,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let dt = CGFloat(TICK)
         let L = SIZE * 0.5                                   // длина «нити» (курсор → центр кота)
         let g: CGFloat = 800                                // «гравитация» (период ≈ 1.3 c)
-        let damp: CGFloat = 2.0                             // сопротивление воздуха
+        let damp: CGFloat = 3.2                             // вязкость: больше — плавнее и «с весом»
 
-        // ускорение подвеса (курсора)
-        let pivotV = (m.x - clingPrevX) / dt
-        let pivotA = (pivotV - clingPivotV) / dt
-        clingPrevX = m.x; clingPivotV = pivotV
+        // ускорение подвеса (курсора): сглаживаем скорость и клипуем пик,
+        // иначе дрожь курсора (÷dt дважды) швыряет маятник от малейшего движения
+        let rawV = (m.x - clingPrevX) / dt
+        let smV = clingPivotV * 0.6 + rawV * 0.4           // low-pass по скорости подвеса
+        var pivotA = (smV - clingPivotV) / dt
+        clingPivotV = smV; clingPrevX = m.x
+        pivotA = max(-1800, min(1800, pivotA))             // ограничить резкий рывок
 
         let th = Double(clingAngle)
         let acc = -(g / L) * CGFloat(sin(th)) - (pivotA / L) * CGFloat(cos(th)) - damp * clingVel
@@ -686,7 +689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cy = m.y - L * CGFloat(cos(Double(clingAngle)))
 
         // грип: первые ~1с (10 тиков) держится крепко, дальше слабеет (срывается легче)
-        let needVel: CGFloat = clingTicks < 20 ? 11 : 7
+        let needVel: CGFloat = clingTicks < 20 ? 9 : 6
         if clingTicks > 10 && abs(clingVel) > needVel {       // сильно раскачали → срывается и летит по параболе
             clinging = false
             x = cx; fallY = cy

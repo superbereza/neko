@@ -23,7 +23,7 @@ extension AppDelegate {
         case .idle:    stDur = Int.random(in: 40...110)
         case .walk:    stDur = 0
         case .digging: stDur = Int.random(in: 30...50)      // ~3–5 c копает
-        case .away:    stDur = Int.random(in: 1800...108000) // ~3 мин … 3 ч «в другом спейсе/за стеной», потом вернётся на активный десктоп
+        case .away:    stDur = Int.random(in: 1800...72000)  // ~3 мин … 2 ч «за кадром», потом вернётся
         case .falling: stDur = 0
         case .hunt:    stDur = 30
         case .play:    stDur = 8
@@ -205,8 +205,8 @@ extension AppDelegate {
     // Охота как НАМЕРЕНИЕ: интерес растёт от движения курсора рядом (интенсивнее машешь — сильнее),
     // затухает сам; порог зависит от состояния (сидит — легко, гуляет — труднее, носится — занят).
     func perceive() {
-        guard !bedtimeNow, huntCool == 0, !eating, !toFood, !goingAway, !leaving, energy > 0.2,
-              st == .idle || st == .walk || st == .zoomies else { huntInterest = 0; return }   // выдохся (e≤0.2) — не гоняется, копит силы
+        guard !bedtimeNow, huntCool == 0, !eating, !toFood, !goingAway, !leaving,
+              st == .idle || st == .walk || st == .zoomies else { huntInterest = 0; return }   // всегда отзывчив на курсор (даже уставший)
         huntSat = max(0, huntSat - 0.004)              // насыщение от игры спадает (отдохнул — снова интересно)
         let m = NSEvent.mouseLocation
         let dx = m.x - x, dy = m.y - y
@@ -259,10 +259,10 @@ extension AppDelegate {
         if toPlay { targetX = k.x; return }              // уже бежит к мячу — не передумывает на полпути
         if playCool > 0 { return }                       // только что ударил — пауза, пусть мяч отлетит (не семеним вокруг)
 
-        // «хочу играть» = насколько не наигрался (1-playSat) × насколько есть силы (energy).
-        // Выдохся (energy низкая) → НЕ играет, лежит и копит силы. Скука с одним мячом гасит интерес
-        // отдельно (playSat). Бодро гоняет снова, отдохнув ИЛИ когда подкинули новый/тронули мяч (playSat=0).
-        let want = (1 - playSat) * ramp(energy, 0.2, 0.6)
+        // «хочу играть» = насколько не наигрался (1-playSat). Отзывчив ВСЕГДА, даже вымотанным —
+        // энергию восстанавливает сном, когда его не трогают. Гасит интерес только скука с одним мячом (playSat),
+        // которая спадает со временем ИЛИ обнуляется новым/тронутым мячом.
+        let want = 1 - playSat
         guard Double.random(in: 0..<1) < want * 0.3 else { return }
         switch st {
         case .walk:            toPlay = true; targetX = k.x          // прервать обычную прогулку ради мяча
